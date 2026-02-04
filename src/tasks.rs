@@ -1,10 +1,12 @@
 use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
 use crossbeam_channel::Sender;
 
 use crate::doctl::{self, CreateDropletArgs};
 use crate::model::{Droplet, Image, PortBinding, Region, Size, Snapshot, SshKey};
+use crate::mutagen::{self, DeleteSyncOutcome, SshConfig, SyncPath, SyncSession};
 use crate::ports;
 
 #[derive(Debug, Clone)]
@@ -12,6 +14,7 @@ pub enum Task {
     CheckDoctl,
     RefreshDroplets,
     LoadSnapshots,
+    LoadSnapshotsDelayed { delay_ms: u64 },
     LoadRegions,
     LoadSizes,
     LoadImages,
@@ -22,6 +25,17 @@ pub enum Task {
     DeleteDroplet { droplet_id: u64 },
     StartTunnel(PortBinding),
     StopTunnel { port: u16, pid: u32 },
+    CreateSyncs {
+        ssh: SshConfig,
+        droplet_name: String,
+        paths: Vec<SyncPath>,
+    },
+    RestoreSyncs { ssh: SshConfig },
+    LoadSyncs,
+    DeleteSync {
+        name: String,
+        ssh: Option<SshConfig>,
+    },
 }
 
 #[derive(Debug)]
@@ -39,6 +53,10 @@ pub enum TaskResult {
     DeleteDroplet(Result<()>),
     StartTunnel(Result<PortBinding>),
     StopTunnel(Result<u16>),
+    CreateSyncs(Result<usize>),
+    RestoreSyncs(Result<usize>),
+    Syncs(Result<Vec<SyncSession>>),
+    DeleteSync(Result<DeleteSyncOutcome>),
 }
 
 pub fn spawn(task: Task, tx: Sender<TaskResult>) {
@@ -47,6 +65,10 @@ pub fn spawn(task: Task, tx: Sender<TaskResult>) {
             Task::CheckDoctl => TaskResult::DoctlCheck(doctl::check_doctl()),
             Task::RefreshDroplets => TaskResult::Droplets(doctl::list_droplets()),
             Task::LoadSnapshots => TaskResult::Snapshots(doctl::list_snapshots()),
+            Task::LoadSnapshotsDelayed { delay_ms } => {
+                thread::sleep(Duration::from_millis(delay_ms));
+                TaskResult::Snapshots(doctl::list_snapshots())
+            }
             Task::LoadRegions => TaskResult::Regions(doctl::list_regions()),
             Task::LoadSizes => TaskResult::Sizes(doctl::list_sizes()),
             Task::LoadImages => TaskResult::Images(doctl::list_images()),
@@ -72,6 +94,16 @@ pub fn spawn(task: Task, tx: Sender<TaskResult>) {
             Task::StopTunnel { port, pid } => {
                 let res = ports::stop_tunnel(pid).map(|_| port);
                 TaskResult::StopTunnel(res)
+            }
+            Task::CreateSyncs {
+                ssh,
+                droplet_name,
+                paths,
+            } => TaskResult::CreateSyncs(mutagen::create_syncs(&ssh, &droplet_name, paths)),
+            Task::RestoreSyncs { ssh } => TaskResult::RestoreSyncs(mutagen::restore_syncs(&ssh)),
+            Task::LoadSyncs => TaskResult::Syncs(mutagen::list_syncs()),
+            Task::DeleteSync { name, ssh } => {
+                TaskResult::DeleteSync(mutagen::delete_sync(&name, ssh.as_ref()))
             }
         };
         let _ = tx.send(result);

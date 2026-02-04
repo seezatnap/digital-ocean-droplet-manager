@@ -3,6 +3,7 @@ mod config;
 mod doctl;
 mod input;
 mod model;
+mod mutagen;
 mod ports;
 mod tasks;
 mod ui;

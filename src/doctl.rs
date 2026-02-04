@@ -2,6 +2,7 @@ use std::process::Command;
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
+use serde::de::{Error as DeError, Unexpected, Visitor};
 
 use crate::model::{Droplet, Image, Region, Size, Snapshot, SshKey};
 
@@ -36,12 +37,16 @@ struct NetworkV4 {
 
 #[derive(Debug, Deserialize)]
 struct SnapshotApi {
+    #[serde(deserialize_with = "de_u64")]
     id: u64,
     name: String,
     created_at: String,
     regions: Vec<String>,
+    #[serde(deserialize_with = "de_u64")]
     resource_id: u64,
+    #[serde(deserialize_with = "de_u64")]
     min_disk_size: u64,
+    #[serde(deserialize_with = "de_f64")]
     size_gigabytes: f64,
 }
 
@@ -68,6 +73,114 @@ struct SshKeyApi {
     id: u64,
     name: String,
     fingerprint: String,
+}
+
+fn de_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct U64Visitor;
+
+    impl<'de> Visitor<'de> for U64Visitor {
+        type Value = u64;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a u64 or string containing a u64")
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+            Ok(value)
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: DeError,
+        {
+            if value < 0 {
+                Err(E::invalid_value(Unexpected::Signed(value), &self))
+            } else {
+                Ok(value as u64)
+            }
+        }
+
+        fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+        where
+            E: DeError,
+        {
+            if value.fract() == 0.0 && value >= 0.0 {
+                Ok(value as u64)
+            } else {
+                Err(E::invalid_value(Unexpected::Float(value), &self))
+            }
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: DeError,
+        {
+            value
+                .parse::<u64>()
+                .map_err(|_| E::invalid_value(Unexpected::Str(value), &self))
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: DeError,
+        {
+            value
+                .parse::<u64>()
+                .map_err(|_| E::invalid_value(Unexpected::Str(&value), &self))
+        }
+    }
+
+    deserializer.deserialize_any(U64Visitor)
+}
+
+fn de_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct F64Visitor;
+
+    impl<'de> Visitor<'de> for F64Visitor {
+        type Value = f64;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a f64 or string containing a f64")
+        }
+
+        fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> {
+            Ok(value)
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+            Ok(value as f64)
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+            Ok(value as f64)
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: DeError,
+        {
+            value
+                .parse::<f64>()
+                .map_err(|_| E::invalid_value(Unexpected::Str(value), &self))
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: DeError,
+        {
+            value
+                .parse::<f64>()
+                .map_err(|_| E::invalid_value(Unexpected::Str(&value), &self))
+        }
+    }
+
+    deserializer.deserialize_any(F64Visitor)
 }
 
 pub fn check_doctl() -> Result<()> {

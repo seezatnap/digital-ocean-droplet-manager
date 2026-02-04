@@ -14,7 +14,8 @@ use ratatui::Frame;
 use ratatui::Terminal;
 
 use crate::app::{
-    App, BindForm, CreateForm, Modal, Picker, RestoreForm, Screen, SnapshotForm, ToastLevel,
+    App, BindForm, CreateForm, Modal, Picker, RestoreForm, Screen, SnapshotForm, SyncForm,
+    ToastLevel,
 };
 use crate::input::TextInput;
 use crate::ports;
@@ -98,6 +99,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     match app.screen {
         Screen::Home => draw_home(frame, app, &theme),
         Screen::Bindings => draw_bindings(frame, app, &theme),
+        Screen::Syncs => draw_syncs(frame, app, &theme),
     }
 
     if let Some(modal) = &app.modal {
@@ -196,6 +198,83 @@ fn draw_bindings(frame: &mut Frame, app: &App, theme: &Theme) {
         Span::raw(" unbind  "),
         Span::styled("x", Style::default().fg(theme.accent)),
         Span::raw(" cleanup stale  "),
+        Span::styled("q", Style::default().fg(theme.accent)),
+        Span::raw(" back"),
+    ]))
+    .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
+    frame.render_widget(help, chunks[2]);
+}
+
+fn draw_syncs(frame: &mut Frame, app: &App, theme: &Theme) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(2)])
+        .split(frame.size());
+
+    let header = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
+        .title("Syncs")
+        .title_alignment(Alignment::Left);
+    let title = Paragraph::new(Line::from(vec![
+        Span::styled("Mutagen Sync Sessions", Style::default().fg(theme.accent)),
+        Span::raw("  (press q to return)"),
+    ]))
+    .block(header);
+    frame.render_widget(title, chunks[0]);
+
+    let items: Vec<ListItem> = app
+        .syncs
+        .iter()
+        .map(|sync| {
+            let status = sync.status.as_deref().unwrap_or("unknown");
+            let status_style = if status.eq_ignore_ascii_case("watching")
+                || status.eq_ignore_ascii_case("syncing")
+                || status.eq_ignore_ascii_case("monitoring")
+            {
+                Style::default().fg(theme.success)
+            } else if status.eq_ignore_ascii_case("paused")
+                || status.eq_ignore_ascii_case("stopped")
+            {
+                Style::default().fg(theme.warning)
+            } else {
+                Style::default().fg(theme.muted)
+            };
+            let line = Line::from(vec![
+                Span::styled("• ", Style::default().fg(theme.muted)),
+                Span::raw(&sync.name),
+                Span::raw("  "),
+                Span::styled(format!("{status}"), status_style),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border))
+                .title("Sessions"),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(theme.accent)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let mut state = ratatui::widgets::ListState::default();
+    if !app.syncs.is_empty() {
+        state.select(Some(app.selected.min(app.syncs.len() - 1)));
+    }
+    frame.render_stateful_widget(list, chunks[1], &mut state);
+
+    let help = Paragraph::new(Line::from(vec![
+        Span::styled("d", Style::default().fg(theme.accent)),
+        Span::raw(" delete  "),
+        Span::styled("g", Style::default().fg(theme.accent)),
+        Span::raw(" refresh  "),
         Span::styled("q", Style::default().fg(theme.accent)),
         Span::raw(" back"),
     ]))
@@ -356,6 +435,9 @@ fn draw_droplet_details(frame: &mut Frame, app: &App, theme: &Theme, area: Rect)
         Line::from(vec![Span::styled("d", Style::default().fg(theme.accent)), Span::raw(" delete")]),
         Line::from(vec![Span::styled("r", Style::default().fg(theme.accent)), Span::raw(" restore")]),
         Line::from(vec![Span::styled("b", Style::default().fg(theme.accent)), Span::raw(" bind port")]),
+        Line::from(vec![Span::styled("m", Style::default().fg(theme.accent)), Span::raw(" sync folders")]),
+        Line::from(vec![Span::styled("u", Style::default().fg(theme.accent)), Span::raw(" restore syncs")]),
+        Line::from(vec![Span::styled("y", Style::default().fg(theme.accent)), Span::raw(" sync list")]),
         Line::from(vec![Span::styled("p", Style::default().fg(theme.accent)), Span::raw(" bindings")]),
     ];
 
@@ -375,6 +457,12 @@ fn draw_footer(frame: &mut Frame, _app: &App, theme: &Theme, area: Rect) {
     let help = Line::from(vec![
         Span::styled("g", Style::default().fg(theme.accent)),
         Span::raw(" refresh  "),
+        Span::styled("m", Style::default().fg(theme.accent)),
+        Span::raw(" sync  "),
+        Span::styled("u", Style::default().fg(theme.accent)),
+        Span::raw(" restore syncs  "),
+        Span::styled("y", Style::default().fg(theme.accent)),
+        Span::raw(" sync list  "),
         Span::styled("d", Style::default().fg(theme.accent)),
         Span::raw(" delete  "),
         Span::styled("f", Style::default().fg(theme.accent)),
@@ -396,6 +484,7 @@ fn draw_modal(frame: &mut Frame, _app: &App, modal: &Modal, theme: &Theme) {
         Modal::Create(form) => draw_create_modal(frame, form, theme, area),
         Modal::Restore(form) => draw_restore_modal(frame, form, theme, area),
         Modal::Bind(form) => draw_bind_modal(frame, form, theme, area),
+        Modal::Sync(form) => draw_sync_modal(frame, form, theme, area),
         Modal::Snapshot(form) => draw_snapshot_modal(frame, form, theme, area),
         Modal::Confirm(confirm) => draw_confirm_modal(frame, confirm, theme, area),
         Modal::Picker { picker, .. } => draw_picker_modal(frame, picker, theme, area),
@@ -660,6 +749,89 @@ fn draw_bind_modal(frame: &mut Frame, form: &BindForm, theme: &Theme, area: Rect
     }
 }
 
+fn draw_sync_modal(frame: &mut Frame, form: &SyncForm, theme: &Theme, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
+        .title("Sync Folders (Mutagen)")
+        .title_alignment(Alignment::Left);
+    frame.render_widget(block, area);
+
+    let inner = inner_rect(area, 1);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    let header = Paragraph::new(Line::from(vec![
+        Span::styled(&form.droplet_name, Style::default().fg(theme.accent)),
+        Span::raw(format!("  {}", form.public_ip)),
+    ]))
+    .style(Style::default());
+    frame.render_widget(header, rows[0]);
+
+    let mut cursor = None;
+    cursor = render_input_row(
+        frame,
+        "Local Paths",
+        &form.local_paths,
+        form.focus == 0,
+        rows[1],
+        theme,
+    )
+    .or(cursor);
+    cursor = render_input_row(
+        frame,
+        "SSH User",
+        &form.ssh_user,
+        form.focus == 1,
+        rows[2],
+        theme,
+    )
+    .or(cursor);
+    cursor = render_input_row(
+        frame,
+        "SSH Key",
+        &form.ssh_key_path,
+        form.focus == 2,
+        rows[3],
+        theme,
+    )
+    .or(cursor);
+    cursor = render_input_row(
+        frame,
+        "SSH Port",
+        &form.ssh_port,
+        form.focus == 3,
+        rows[4],
+        theme,
+    )
+    .or(cursor);
+
+    render_action_row(frame, "Sync", "Cancel", form.focus, 4, rows[5], theme);
+
+    let help = Paragraph::new(Line::from(vec![
+        Span::styled("Comma-separated", Style::default().fg(theme.muted)),
+        Span::raw("  use "),
+        Span::styled("local->remote", Style::default().fg(theme.accent)),
+        Span::raw(" to override remote path"),
+    ]))
+    .style(Style::default().fg(theme.muted));
+    frame.render_widget(help, rows[6]);
+
+    if let Some((x, y)) = cursor {
+        frame.set_cursor(x, y);
+    }
+}
+
 fn draw_snapshot_modal(
     frame: &mut Frame,
     form: &SnapshotForm,
@@ -751,13 +923,15 @@ fn draw_picker_modal(
         .constraints([Constraint::Length(2), Constraint::Min(1), Constraint::Length(2)])
         .split(inner);
 
+    let label = "Search: ";
     let query = Paragraph::new(Line::from(vec![
-        Span::styled("Search: ", Style::default().fg(theme.muted)),
-        Span::raw(&picker.query.value),
+        Span::styled(label, Style::default().fg(theme.muted)),
+        Span::styled(&picker.query.value, Style::default().fg(Color::White)),
     ]))
     .block(Block::default().borders(Borders::ALL).title("Filter"));
     frame.render_widget(query, rows[0]);
-    let cursor_x = rows[0].x + 9 + picker.query.cursor_display_offset() as u16;
+    let cursor_x =
+        rows[0].x + 1 + label.len() as u16 + picker.query.cursor_display_offset() as u16;
     let cursor_y = rows[0].y + 1;
     frame.set_cursor(cursor_x, cursor_y);
 

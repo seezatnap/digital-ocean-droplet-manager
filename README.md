@@ -10,11 +10,13 @@ A fast, keyboard-driven terminal UI for managing DigitalOcean droplets using `do
 - Restore droplets from snapshots.
 - Delete droplets without snapshot (explicit confirmation).
 - Bind local ports to droplet ports with SSH tunnels and collision prevention.
+- Sync local folders to droplets with Mutagen (persisted in `~/.mountlist` on the droplet).
 
 ## Requirements
 - `doctl` installed and authenticated.
 - SSH access to droplets (keys configured in DigitalOcean).
 - Rust toolchain (for building/running).
+- Mutagen installed for folder syncs (`brew install mutagen-io/mutagen/mutagen`).
 
 ## Run
 ```
@@ -28,6 +30,9 @@ cargo run
 - `s` snapshot + delete droplet
 - `d` delete droplet (no snapshot)
 - `b` bind local port to droplet port
+- `m` sync local folders to droplet (Mutagen)
+- `u` restore Mutagen syncs from `~/.mountlist`
+- `y` list/delete Mutagen syncs
 - `Enter` connect to selected droplet
 - `p` manage port bindings
 - `f` toggle running-only filter
@@ -57,4 +62,3 @@ cargo test
   - `doctl account get`
   - `doctl compute droplet list`
 - If port binding fails, verify SSH user/key and accept the host key if prompted.
-
