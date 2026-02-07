@@ -76,6 +76,18 @@ pub struct PortBinding {
     pub tunnel_pid: Option<u32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RsyncBind {
+    pub droplet_name: String,
+    pub ssh_user: String,
+    pub host: String,
+    pub ssh_port: u16,
+    pub ssh_key_path: String,
+    pub remote_path: String,
+    pub local_path: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
     pub default_ssh_user: String,
@@ -86,5 +98,7 @@ pub struct Settings {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppStateFile {
     pub bindings: Vec<PortBinding>,
+    #[serde(default, alias = "mounts")]
+    pub rsync_binds: Vec<RsyncBind>,
     pub settings: Settings,
 }

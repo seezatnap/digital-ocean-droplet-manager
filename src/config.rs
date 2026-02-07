@@ -46,6 +46,7 @@ pub fn default_settings() -> Settings {
 pub fn default_state() -> AppStateFile {
     AppStateFile {
         bindings: Vec::new(),
+        rsync_binds: Vec::new(),
         settings: default_settings(),
     }
 }
@@ -78,6 +79,7 @@ mod tests {
     fn default_state_is_empty() {
         let state = default_state();
         assert!(state.bindings.is_empty());
+        assert!(state.rsync_binds.is_empty());
         assert_eq!(state.settings.default_ssh_user, "root");
     }
 }

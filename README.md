@@ -12,12 +12,14 @@ A fast, keyboard-driven terminal UI for managing DigitalOcean droplets using `do
 - Bind local ports to droplet ports with SSH tunnels and collision prevention.
 - Sync local folders to droplets with Mutagen (persisted in `~/.mountlist` on the droplet).
 - Browse remote folders in the TUI and open them in Cursor over SSH remote.
+- Create RSYNC binds from remote folders to local folders, track them in a global registry, and push/pull with shortcuts.
 
 ## Requirements
 - `doctl` installed and authenticated.
 - SSH access to droplets (keys configured in DigitalOcean).
 - Rust toolchain (for building/running).
 - Mutagen installed for folder syncs (`brew install mutagen-io/mutagen/mutagen`).
+- `rsync` available locally.
 
 ## Run
 ```
@@ -32,7 +34,8 @@ cargo run
 - `d` delete droplet (no snapshot)
 - `b` bind local port to droplet port
 - `m` Mutagen config (sync, restore, list, remove droplet bindings, disable)
-- `o` open remote folder browser (then open selected path in Cursor)
+- `o` open remote folder browser
+- `u` open RSYNC binds registry
 - `Enter` connect to selected droplet
 - `p` port bindings
 - `f` toggle running-only filter
@@ -43,6 +46,15 @@ cargo run
 - Prevents double-booking ports by checking a local registry and OS port availability.
 - Active bindings are stored in a local JSON state file under your OS config directory.
 - Stale bindings can be cleaned up from the bindings screen (`x`).
+
+## RSYNC Binds
+- In remote browser: highlight a folder and press `m` to create a bind to a local folder.
+- Bind creation validates that the local folder is empty (or doesn't exist yet).
+- New binds immediately open in Finder after creation.
+- In the RSYNC binds screen:
+  - `u` push local changes to remote
+  - `d` pull remote changes to local
+  - `x` delete bind (optional local folder deletion)
 
 ## Regions
 - Regions are currently hardcoded in the app with availability flags.

@@ -127,6 +127,7 @@ mod tests {
         );
         let state = AppStateFile {
             bindings: vec![binding],
+            rsync_binds: Vec::new(),
             settings: Default::default(),
         };
         assert!(port_in_registry(&state, 8080).is_some());

@@ -1,12 +1,14 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::thread;
 use std::time::Duration;
-use std::{path::Path, path::PathBuf, process::Command};
 
 use anyhow::{Context, Result, anyhow};
 use crossbeam_channel::Sender;
 
 use crate::doctl::{self, CreateDropletArgs};
-use crate::model::{Droplet, Image, PortBinding, Region, Size, Snapshot, SshKey};
+use crate::model::{Droplet, Image, PortBinding, Region, RsyncBind, Size, Snapshot, SshKey};
 use crate::mutagen::{
     self, DeleteDropletSyncsOutcome, DeleteSyncOutcome, SshConfig, SyncPath, SyncSession,
 };
@@ -16,6 +18,24 @@ use crate::ports;
 pub struct RemoteDirectoryListing {
     pub path: String,
     pub directories: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RsyncDirection {
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone)]
+pub struct RsyncRunOutcome {
+    pub bind: RsyncBind,
+    pub direction: RsyncDirection,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeleteRsyncBindOutcome {
+    pub bind: RsyncBind,
+    pub local_deleted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +77,17 @@ pub enum Task {
         name: String,
         ssh: Option<SshConfig>,
     },
+    CreateRsyncBind {
+        bind: RsyncBind,
+    },
+    RunRsync {
+        bind: RsyncBind,
+        direction: RsyncDirection,
+    },
+    DeleteRsyncBind {
+        bind: RsyncBind,
+        delete_local_copy: bool,
+    },
     ListRemoteDirectories {
         ssh: SshConfig,
         path: String,
@@ -87,6 +118,9 @@ pub enum TaskResult {
     RestoreSyncs(Result<usize>),
     Syncs(Result<Vec<SyncSession>>),
     DeleteSync(Result<DeleteSyncOutcome>),
+    CreateRsyncBind(Result<RsyncBind>),
+    RunRsync(Result<RsyncRunOutcome>),
+    DeleteRsyncBind(Result<DeleteRsyncBindOutcome>),
     RemoteDirectories {
         requested_path: String,
         result: Result<RemoteDirectoryListing>,
@@ -141,6 +175,12 @@ pub fn spawn(task: Task, tx: Sender<TaskResult>) {
             Task::DeleteSync { name, ssh } => {
                 TaskResult::DeleteSync(mutagen::delete_sync(&name, ssh.as_ref()))
             }
+            Task::CreateRsyncBind { bind } => TaskResult::CreateRsyncBind(create_rsync_bind(&bind)),
+            Task::RunRsync { bind, direction } => TaskResult::RunRsync(run_rsync(&bind, direction)),
+            Task::DeleteRsyncBind {
+                bind,
+                delete_local_copy,
+            } => TaskResult::DeleteRsyncBind(delete_rsync_bind(bind, delete_local_copy)),
             Task::ListRemoteDirectories { ssh, path } => TaskResult::RemoteDirectories {
                 requested_path: path.clone(),
                 result: list_remote_directories(&ssh, &path),
@@ -154,6 +194,114 @@ pub fn spawn(task: Task, tx: Sender<TaskResult>) {
         };
         let _ = tx.send(result);
     });
+}
+
+fn create_rsync_bind(bind: &RsyncBind) -> Result<RsyncBind> {
+    let local_path = expand_local_path(&bind.local_path);
+    let local = Path::new(&local_path);
+    if local.exists() {
+        let metadata = fs::metadata(local)
+            .with_context(|| format!("Failed to inspect local path '{local_path}'"))?;
+        if !metadata.is_dir() {
+            return Err(anyhow!(
+                "Local path '{}' exists and is not a directory. Pick a different local folder.",
+                local_path
+            ));
+        }
+        if !is_dir_empty(local)? {
+            return Err(anyhow!(
+                "Local folder '{}' is not empty. Move/remove its contents or pick a different folder.",
+                local_path
+            ));
+        }
+    } else {
+        fs::create_dir_all(local)
+            .with_context(|| format!("Failed to create local folder '{}'", local_path))?;
+    }
+
+    let mut created = bind.clone();
+    created.local_path = local_path;
+    Ok(created)
+}
+
+fn run_rsync(bind: &RsyncBind, direction: RsyncDirection) -> Result<RsyncRunOutcome> {
+    let local_path = expand_local_path(&bind.local_path);
+    fs::create_dir_all(&local_path)
+        .with_context(|| format!("Failed to ensure local folder '{local_path}'"))?;
+
+    let key_path = expand_local_path(&bind.ssh_key_path);
+    let remote = format!("{}@{}:{}", bind.ssh_user, bind.host, bind.remote_path);
+    let ssh_cmd = format!(
+        "ssh -i {} -p {} -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3",
+        shell_escape_arg(&key_path),
+        bind.ssh_port
+    );
+
+    let (source, dest) = match direction {
+        RsyncDirection::Up => (format!("{}/", local_path), remote),
+        RsyncDirection::Down => (format!("{remote}/"), format!("{}/", local_path)),
+    };
+
+    let output = Command::new("rsync")
+        .arg("-az")
+        .arg("--human-readable")
+        .arg("--exclude=node_modules")
+        .arg("--exclude=target")
+        .arg("--exclude=/.cargo*")
+        .arg("-e")
+        .arg(ssh_cmd)
+        .arg(source)
+        .arg(dest)
+        .output()
+        .context("Failed to execute rsync")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Err(anyhow!(
+            "rsync failed ({:?}).\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            if stdout.is_empty() {
+                "<empty>"
+            } else {
+                &stdout
+            },
+            if stderr.is_empty() {
+                "<empty>"
+            } else {
+                &stderr
+            }
+        ));
+    }
+
+    let mut result_bind = bind.clone();
+    result_bind.local_path = local_path;
+    Ok(RsyncRunOutcome {
+        bind: result_bind,
+        direction,
+    })
+}
+
+fn delete_rsync_bind(bind: RsyncBind, delete_local_copy: bool) -> Result<DeleteRsyncBindOutcome> {
+    let local_path = expand_local_path(&bind.local_path);
+    let mut local_deleted = false;
+    if delete_local_copy {
+        let path = Path::new(&local_path);
+        if path.exists() {
+            if path.is_dir() {
+                fs::remove_dir_all(path)
+                    .with_context(|| format!("Failed to remove local folder '{local_path}'"))?;
+            } else {
+                fs::remove_file(path)
+                    .with_context(|| format!("Failed to remove local file '{local_path}'"))?;
+            }
+            local_deleted = true;
+        }
+    }
+    Ok(DeleteRsyncBindOutcome {
+        bind,
+        local_deleted,
+    })
 }
 
 fn list_remote_directories(ssh: &SshConfig, path: &str) -> Result<RemoteDirectoryListing> {
@@ -206,6 +354,12 @@ fn list_remote_directories(ssh: &SshConfig, path: &str) -> Result<RemoteDirector
     })
 }
 
+fn is_dir_empty(path: &Path) -> Result<bool> {
+    let mut entries = fs::read_dir(path)
+        .with_context(|| format!("Failed to read directory '{}'", path.display()))?;
+    Ok(entries.next().is_none())
+}
+
 fn expand_local_path(path: &str) -> String {
     let trimmed = path.trim();
     if trimmed == "~" || trimmed.starts_with("~/") {
@@ -224,6 +378,14 @@ fn expand_local_path(path: &str) -> String {
 }
 
 fn shell_escape(value: &str) -> String {
+    if value.is_empty() {
+        "''".to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+}
+
+fn shell_escape_arg(value: &str) -> String {
     if value.is_empty() {
         "''".to_string()
     } else {

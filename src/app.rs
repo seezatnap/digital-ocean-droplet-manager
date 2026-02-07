@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use crossbeam_channel::Sender;
@@ -7,16 +7,17 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::config;
 use crate::doctl::CreateDropletArgs;
 use crate::input::TextInput;
-use crate::model::{AppStateFile, Droplet, Image, Region, Size, Snapshot, SshKey};
+use crate::model::{AppStateFile, Droplet, Image, Region, RsyncBind, Size, Snapshot, SshKey};
 use crate::mutagen::{SshConfig, SyncPath, SyncSession};
 use crate::ports;
-use crate::tasks::{self, Task, TaskResult};
+use crate::tasks::{self, RsyncDirection, Task, TaskResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     Home,
     Bindings,
     Syncs,
+    RsyncBinds,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +147,33 @@ pub struct RemoteBrowserForm {
 }
 
 #[derive(Debug, Clone)]
+pub struct RsyncBindForm {
+    pub droplet_name: String,
+    pub ssh: SshConfig,
+    pub remote_path: String,
+    pub local_path: TextInput,
+    pub focus: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeleteRsyncBindForm {
+    pub bind: RsyncBind,
+    pub delete_local_copy: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RsyncBindActionsForm {
+    pub bind: RsyncBind,
+    pub selected_action: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct Notice {
+    pub title: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct Confirm {
     pub title: String,
     pub message: String,
@@ -179,6 +207,10 @@ pub enum Modal {
     Sync(SyncForm),
     Mutagen(MutagenConfig),
     RemoteBrowser(RemoteBrowserForm),
+    RsyncBind(RsyncBindForm),
+    RsyncBindActions(RsyncBindActionsForm),
+    DeleteRsyncBind(DeleteRsyncBindForm),
+    Notice(Notice),
     Snapshot(SnapshotForm),
     Picker { picker: Picker, parent: Box<Modal> },
     Confirm(Confirm),
@@ -203,6 +235,7 @@ pub struct App {
     pub last_refresh: Option<DateTime<Utc>>,
     pub filter_running: bool,
     pub pending: usize,
+    pub pending_labels: HashMap<String, usize>,
     pub terminal_reset: bool,
     pub task_tx: Sender<TaskResult>,
 }
@@ -228,6 +261,7 @@ impl App {
             last_refresh: None,
             filter_running: false,
             pending: 0,
+            pending_labels: HashMap::new(),
             terminal_reset: false,
             task_tx,
         }
@@ -248,14 +282,12 @@ impl App {
     }
 
     pub fn spawn(&mut self, task: Task) {
-        self.pending += 1;
+        self.track_task_start(&task);
         tasks::spawn(task, self.task_tx.clone());
     }
 
     pub fn handle_task_result(&mut self, result: TaskResult) {
-        if self.pending > 0 {
-            self.pending -= 1;
-        }
+        self.track_task_end(&result);
         match result {
             TaskResult::DoctlCheck(res) => match res {
                 Ok(()) => self.push_toast("doctl authenticated", ToastLevel::Success),
@@ -418,6 +450,103 @@ impl App {
                 }
                 Err(err) => self.push_toast(err.to_string(), ToastLevel::Error),
             },
+            TaskResult::CreateRsyncBind(res) => match res {
+                Ok(bind) => {
+                    self.state
+                        .rsync_binds
+                        .retain(|item| !same_rsync_bind(item, &bind));
+                    self.state.rsync_binds.push(bind.clone());
+                    self.state
+                        .rsync_binds
+                        .sort_by(|a, b| a.local_path.cmp(&b.local_path));
+                    let _ = config::save_state(&self.state);
+
+                    if self.screen == Screen::RsyncBinds {
+                        self.selected = self
+                            .state
+                            .rsync_binds
+                            .iter()
+                            .position(|item| same_rsync_bind(item, &bind))
+                            .unwrap_or(0);
+                    }
+
+                    self.modal = None;
+                    match self.open_local_folder(&bind.local_path) {
+                        Ok(()) => self.push_toast(
+                            format!(
+                                "Bound '{}' -> '{}', opened in Finder, pulling remote files...",
+                                bind.remote_path, bind.local_path
+                            ),
+                            ToastLevel::Success,
+                        ),
+                        Err(err) => self.push_toast(
+                            format!(
+                                "Bind created and starting initial pull, but failed to open Finder: {err}"
+                            ),
+                            ToastLevel::Warning,
+                        ),
+                    }
+                    self.spawn(Task::RunRsync {
+                        bind,
+                        direction: RsyncDirection::Down,
+                    });
+                }
+                Err(err) => {
+                    self.modal = Some(Modal::Notice(Notice {
+                        title: "Unable to Create RSYNC Bind".to_string(),
+                        message: err.to_string(),
+                    }));
+                }
+            },
+            TaskResult::RunRsync(res) => match res {
+                Ok(outcome) => {
+                    let action = match outcome.direction {
+                        RsyncDirection::Up => "Pushed local changes to remote",
+                        RsyncDirection::Down => "Pulled remote changes to local",
+                    };
+                    self.push_toast(
+                        format!(
+                            "{action}: '{}' <-> '{}'",
+                            outcome.bind.remote_path, outcome.bind.local_path
+                        ),
+                        ToastLevel::Success,
+                    );
+                }
+                Err(err) => {
+                    self.modal = Some(Modal::Notice(Notice {
+                        title: "RSYNC Failed".to_string(),
+                        message: err.to_string(),
+                    }));
+                }
+            },
+            TaskResult::DeleteRsyncBind(res) => match res {
+                Ok(outcome) => {
+                    self.state
+                        .rsync_binds
+                        .retain(|bind| !same_rsync_bind(bind, &outcome.bind));
+                    if self.state.rsync_binds.is_empty() {
+                        self.selected = 0;
+                    } else if self.screen == Screen::RsyncBinds {
+                        self.selected = self.selected.min(self.state.rsync_binds.len() - 1);
+                    }
+                    let _ = config::save_state(&self.state);
+                    self.modal = None;
+                    if outcome.local_deleted {
+                        self.push_toast(
+                            format!("Deleted bind and removed '{}'", outcome.bind.local_path),
+                            ToastLevel::Success,
+                        );
+                    } else {
+                        self.push_toast("Deleted rsync bind", ToastLevel::Success);
+                    }
+                }
+                Err(err) => {
+                    self.modal = Some(Modal::Notice(Notice {
+                        title: "Failed to Delete RSYNC Bind".to_string(),
+                        message: err.to_string(),
+                    }));
+                }
+            },
             TaskResult::RemoteDirectories {
                 requested_path,
                 result,
@@ -492,6 +621,7 @@ impl App {
             Screen::Home => self.handle_home_key(key),
             Screen::Bindings => self.handle_bindings_key(key),
             Screen::Syncs => self.handle_syncs_key(key),
+            Screen::RsyncBinds => self.handle_rsync_binds_key(key),
         }
     }
 
@@ -506,6 +636,7 @@ impl App {
             KeyCode::Char('b') => self.open_bind_modal(),
             KeyCode::Char('m') => self.open_mutagen_modal(),
             KeyCode::Char('o') => self.open_remote_browser(),
+            KeyCode::Char('u') => self.open_rsync_binds_screen(),
             KeyCode::Char('p') => {
                 self.screen = Screen::Bindings;
                 self.selected = 0;
@@ -549,6 +680,40 @@ impl App {
         }
     }
 
+    fn handle_rsync_binds_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.screen = Screen::Home;
+                self.selected = 0;
+            }
+            KeyCode::Down => self.move_rsync_bind_selection(1),
+            KeyCode::Up => self.move_rsync_bind_selection(-1),
+            KeyCode::Enter => self.open_selected_rsync_bind_actions(),
+            KeyCode::Char('?') | KeyCode::Char('h') => self.show_rsync_binds_shortcuts(),
+            _ => {}
+        }
+    }
+
+    fn show_rsync_binds_shortcuts(&mut self) {
+        self.modal = Some(Modal::Notice(Notice {
+            title: "RSYNC Binds Shortcuts".to_string(),
+            message: "Up/Down: Move selection\nEnter: Open bind actions modal\nIn modal: Push/Pull/Finder/iTerm/Delete\nq/Esc: Back to Home\nh or ?: Show this help".to_string(),
+        }));
+    }
+
+    fn open_selected_rsync_bind_actions(&mut self) {
+        if self.state.rsync_binds.is_empty() {
+            self.push_toast("No rsync binds available", ToastLevel::Info);
+            return;
+        }
+        if let Some(bind) = self.state.rsync_binds.get(self.selected).cloned() {
+            self.modal = Some(Modal::RsyncBindActions(RsyncBindActionsForm {
+                bind,
+                selected_action: 0,
+            }));
+        }
+    }
+
     fn handle_modal_key(&mut self, modal: Modal, key: KeyEvent) {
         match modal {
             Modal::Create(mut form) => {
@@ -580,6 +745,24 @@ impl App {
                 if self.handle_remote_browser_key(&mut form, key) {
                     self.modal = Some(Modal::RemoteBrowser(form));
                 }
+            }
+            Modal::RsyncBind(mut form) => {
+                if self.handle_rsync_bind_form_key(&mut form, key) {
+                    self.modal = Some(Modal::RsyncBind(form));
+                }
+            }
+            Modal::RsyncBindActions(mut form) => {
+                if self.handle_rsync_bind_actions_key(&mut form, key) {
+                    self.modal = Some(Modal::RsyncBindActions(form));
+                }
+            }
+            Modal::DeleteRsyncBind(mut form) => {
+                if self.handle_delete_rsync_bind_key(&mut form, key) {
+                    self.modal = Some(Modal::DeleteRsyncBind(form));
+                }
+            }
+            Modal::Notice(notice) => {
+                self.handle_notice_key(notice, key);
             }
             Modal::Snapshot(mut form) => {
                 if self.handle_snapshot_key(&mut form, key) {
@@ -901,9 +1084,164 @@ impl App {
                 self.push_toast("No folder selected", ToastLevel::Warning);
                 return true;
             }
+            KeyCode::Char('m') => {
+                if let Some(entry) = form.entries.get(form.selected) {
+                    self.open_rsync_bind_modal(form, entry.path.clone());
+                    return false;
+                }
+                self.push_toast("No folder selected", ToastLevel::Warning);
+                return true;
+            }
             _ => {}
         }
         true
+    }
+
+    fn handle_rsync_bind_form_key(&mut self, form: &mut RsyncBindForm, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.modal = None;
+                return false;
+            }
+            KeyCode::Tab | KeyCode::Down => {
+                form.focus = (form.focus + 1) % 3;
+                return true;
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                form.focus = (form.focus + 2) % 3;
+                return true;
+            }
+            KeyCode::Enter => match form.focus {
+                0 => {
+                    form.focus = 1;
+                    return true;
+                }
+                1 => {
+                    self.submit_rsync_bind_form(form.clone());
+                    return false;
+                }
+                _ => {
+                    self.modal = None;
+                    return false;
+                }
+            },
+            _ => {}
+        }
+
+        if form.focus == 0 {
+            handle_text_input(&mut form.local_path, key);
+        }
+        true
+    }
+
+    fn handle_rsync_bind_actions_key(
+        &mut self,
+        form: &mut RsyncBindActionsForm,
+        key: KeyEvent,
+    ) -> bool {
+        const ACTIONS: usize = 6;
+        match key.code {
+            KeyCode::Esc => {
+                self.modal = None;
+                return false;
+            }
+            KeyCode::Left | KeyCode::BackTab => {
+                if form.selected_action == 0 {
+                    form.selected_action = ACTIONS - 1;
+                } else {
+                    form.selected_action -= 1;
+                }
+                return true;
+            }
+            KeyCode::Right | KeyCode::Tab => {
+                form.selected_action = (form.selected_action + 1) % ACTIONS;
+                return true;
+            }
+            KeyCode::Up => {
+                if form.selected_action >= 2 {
+                    form.selected_action = 0;
+                }
+                return true;
+            }
+            KeyCode::Down => {
+                if form.selected_action < 2 {
+                    form.selected_action = 2;
+                }
+                return true;
+            }
+            KeyCode::Enter => match form.selected_action {
+                0 => {
+                    self.run_selected_rsync(RsyncDirection::Up);
+                    self.modal = None;
+                    return false;
+                }
+                1 => {
+                    self.run_selected_rsync(RsyncDirection::Down);
+                    self.modal = None;
+                    return false;
+                }
+                2 => {
+                    self.open_selected_rsync_in_finder();
+                    self.modal = None;
+                    return false;
+                }
+                3 => {
+                    self.open_selected_rsync_in_iterm();
+                    self.modal = None;
+                    return false;
+                }
+                4 => {
+                    self.confirm_delete_selected_rsync_bind();
+                    return false;
+                }
+                _ => {
+                    self.modal = None;
+                    return false;
+                }
+            },
+            _ => {}
+        }
+        true
+    }
+
+    fn handle_delete_rsync_bind_key(
+        &mut self,
+        form: &mut DeleteRsyncBindForm,
+        key: KeyEvent,
+    ) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.modal = None;
+                return false;
+            }
+            KeyCode::Char(' ') => {
+                form.delete_local_copy = !form.delete_local_copy;
+                return true;
+            }
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.spawn(Task::DeleteRsyncBind {
+                    bind: form.bind.clone(),
+                    delete_local_copy: form.delete_local_copy,
+                });
+                self.modal = None;
+                return false;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.modal = None;
+                return false;
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn handle_notice_key(&mut self, _notice: Notice, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('q') => {
+                self.modal = None;
+            }
+            _ => {}
+        }
     }
 
     fn handle_snapshot_key(&mut self, form: &mut SnapshotForm, key: KeyEvent) -> bool {
@@ -1540,6 +1878,136 @@ impl App {
         self.terminal_reset = true;
     }
 
+    fn open_rsync_bind_modal(&mut self, form: &RemoteBrowserForm, remote_path: String) {
+        let local_path = build_rsync_local_path(&form.droplet_name, &remote_path);
+        let bind_form = RsyncBindForm {
+            droplet_name: form.droplet_name.clone(),
+            ssh: form.ssh.clone(),
+            remote_path,
+            local_path: TextInput::new(local_path),
+            focus: 0,
+        };
+        self.modal = Some(Modal::RsyncBind(bind_form));
+    }
+
+    fn submit_rsync_bind_form(&mut self, form: RsyncBindForm) {
+        let local_path = form.local_path.value.trim();
+        if local_path.is_empty() {
+            self.push_toast("Local folder is required", ToastLevel::Warning);
+            return;
+        }
+
+        let bind = RsyncBind {
+            droplet_name: form.droplet_name,
+            ssh_user: form.ssh.user,
+            host: form.ssh.host,
+            ssh_port: form.ssh.port,
+            ssh_key_path: form.ssh.key_path,
+            remote_path: form.remote_path,
+            local_path: local_path.to_string(),
+            created_at: Utc::now(),
+        };
+
+        self.spawn(Task::CreateRsyncBind { bind });
+    }
+
+    fn open_local_folder(&mut self, local_path: &str) -> anyhow::Result<()> {
+        let args = vec![local_path.to_string()];
+        crate::ui::run_external("open", &args)?;
+        self.terminal_reset = true;
+        Ok(())
+    }
+
+    fn open_rsync_binds_screen(&mut self) {
+        self.screen = Screen::RsyncBinds;
+        self.selected = 0;
+    }
+
+    fn run_selected_rsync(&mut self, direction: RsyncDirection) {
+        if self.state.rsync_binds.is_empty() {
+            self.push_toast("No rsync binds available", ToastLevel::Info);
+            return;
+        }
+        if let Some(bind) = self.state.rsync_binds.get(self.selected).cloned() {
+            self.spawn(Task::RunRsync { bind, direction });
+        }
+    }
+
+    fn confirm_delete_selected_rsync_bind(&mut self) {
+        if self.state.rsync_binds.is_empty() {
+            self.push_toast("No rsync binds to delete", ToastLevel::Info);
+            return;
+        }
+        if let Some(bind) = self.state.rsync_binds.get(self.selected).cloned() {
+            self.modal = Some(Modal::DeleteRsyncBind(DeleteRsyncBindForm {
+                bind,
+                delete_local_copy: false,
+            }));
+        }
+    }
+
+    fn open_selected_rsync_in_iterm(&mut self) {
+        if self.state.rsync_binds.is_empty() {
+            self.push_toast("No rsync binds available", ToastLevel::Info);
+            return;
+        }
+        if let Some(bind) = self.state.rsync_binds.get(self.selected).cloned() {
+            if !self.ensure_local_bind_path_exists(&bind.local_path) {
+                return;
+            }
+            match self.open_local_folder_in_iterm(&bind.local_path) {
+                Ok(()) => self.push_toast(
+                    format!("Opened '{}' in iTerm", bind.local_path),
+                    ToastLevel::Success,
+                ),
+                Err(err) => self.push_toast(err.to_string(), ToastLevel::Error),
+            }
+        }
+    }
+
+    fn open_selected_rsync_in_finder(&mut self) {
+        if self.state.rsync_binds.is_empty() {
+            self.push_toast("No rsync binds available", ToastLevel::Info);
+            return;
+        }
+        if let Some(bind) = self.state.rsync_binds.get(self.selected).cloned() {
+            if !self.ensure_local_bind_path_exists(&bind.local_path) {
+                return;
+            }
+            match self.open_local_folder(&bind.local_path) {
+                Ok(()) => self.push_toast(
+                    format!("Opened '{}' in Finder", bind.local_path),
+                    ToastLevel::Success,
+                ),
+                Err(err) => self.push_toast(err.to_string(), ToastLevel::Error),
+            }
+        }
+    }
+
+    fn open_local_folder_in_iterm(&mut self, local_path: &str) -> anyhow::Result<()> {
+        let args = vec![
+            "-a".to_string(),
+            "iTerm".to_string(),
+            local_path.to_string(),
+        ];
+        crate::ui::run_external("open", &args)?;
+        self.terminal_reset = true;
+        Ok(())
+    }
+
+    fn ensure_local_bind_path_exists(&mut self, local_path: &str) -> bool {
+        let path = std::path::Path::new(local_path);
+        if path.is_dir() {
+            true
+        } else {
+            self.push_toast(
+                "Local folder is missing. Pull down changes first.",
+                ToastLevel::Warning,
+            );
+            false
+        }
+    }
+
     fn move_selection(&mut self, delta: i32) {
         let indices = self.visible_indices();
         if indices.is_empty() {
@@ -1577,6 +2045,21 @@ impl App {
             return;
         }
         let max = self.syncs.len() as i32 - 1;
+        let mut next = self.selected as i32 + delta;
+        if next < 0 {
+            next = 0;
+        } else if next > max {
+            next = max;
+        }
+        self.selected = next as usize;
+    }
+
+    fn move_rsync_bind_selection(&mut self, delta: i32) {
+        if self.state.rsync_binds.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        let max = self.state.rsync_binds.len() as i32 - 1;
         let mut next = self.selected as i32 + delta;
         if next < 0 {
             next = 0;
@@ -1804,6 +2287,63 @@ impl App {
         }
     }
 
+    pub fn pending_overlay_lines(&self) -> Vec<String> {
+        let mut lines = vec![format!(
+            "{} task{} in progress",
+            self.pending,
+            if self.pending == 1 { "" } else { "s" }
+        )];
+
+        if self.pending_labels.is_empty() {
+            lines.push("Waiting for background work...".to_string());
+            return lines;
+        }
+
+        let mut labels: Vec<(&str, usize)> = self
+            .pending_labels
+            .iter()
+            .map(|(label, count)| (label.as_str(), *count))
+            .collect();
+        labels.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+        for (label, count) in labels.iter().take(4) {
+            if *count > 1 {
+                lines.push(format!("- {label} ({count})"));
+            } else {
+                lines.push(format!("- {label}"));
+            }
+        }
+
+        if labels.len() > 4 {
+            lines.push(format!("...and {} more", labels.len() - 4));
+        }
+
+        lines
+    }
+
+    fn track_task_start(&mut self, task: &Task) {
+        self.pending += 1;
+        let label = pending_label_for_task(task);
+        *self.pending_labels.entry(label.to_string()).or_insert(0) += 1;
+    }
+
+    fn track_task_end(&mut self, result: &TaskResult) {
+        if self.pending > 0 {
+            self.pending -= 1;
+        }
+        let label = pending_label_for_result(result);
+        if let Some(count) = self.pending_labels.get_mut(label) {
+            if *count > 1 {
+                *count -= 1;
+            } else {
+                self.pending_labels.remove(label);
+            }
+        }
+        if self.pending == 0 {
+            self.pending_labels.clear();
+        }
+    }
+
     fn snapshot_picker_items(&self) -> Vec<PickerItem> {
         self.snapshots
             .iter()
@@ -1926,6 +2466,56 @@ fn join_remote_path(base: &str, child: &str) -> String {
     }
 }
 
+fn same_rsync_bind(a: &RsyncBind, b: &RsyncBind) -> bool {
+    a.ssh_user == b.ssh_user
+        && a.host == b.host
+        && a.ssh_port == b.ssh_port
+        && a.remote_path == b.remote_path
+        && a.local_path == b.local_path
+}
+
+fn build_rsync_local_path(droplet_name: &str, remote_path: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "~".to_string());
+    let droplet = sanitize_path_component(droplet_name, "droplet");
+    let remote = if remote_path == "/" {
+        "root".to_string()
+    } else {
+        let combined = remote_path
+            .trim_matches('/')
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .map(|part| sanitize_path_component(part, "dir"))
+            .collect::<Vec<_>>()
+            .join("--");
+        if combined.is_empty() {
+            "root".to_string()
+        } else {
+            combined
+        }
+    };
+    format!("{home}/mnt/{droplet}/{remote}")
+}
+
+fn sanitize_path_component(value: &str, fallback: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in value.trim().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum MutagenActionKind {
     ListSyncs,
@@ -2006,6 +2596,71 @@ fn sanitize_name(name: &str) -> String {
         out
     } else {
         trimmed.to_string()
+    }
+}
+
+fn pending_label_for_task(task: &Task) -> &'static str {
+    match task {
+        Task::CheckDoctl => "Checking doctl authentication",
+        Task::RefreshDroplets => "Refreshing droplets",
+        Task::LoadSnapshots | Task::LoadSnapshotsDelayed { .. } => "Loading snapshots",
+        Task::LoadRegions => "Loading regions",
+        Task::LoadSizes => "Loading sizes",
+        Task::LoadImages => "Loading images",
+        Task::LoadSshKeys => "Loading SSH keys",
+        Task::CreateDroplet(_) => "Creating droplet",
+        Task::RestoreDroplet(_) => "Restoring droplet",
+        Task::SnapshotDelete { .. } => "Snapshotting and deleting droplet",
+        Task::DeleteDroplet { .. } => "Deleting droplet",
+        Task::StartTunnel(_) => "Starting SSH port tunnel",
+        Task::StopTunnel { .. } => "Stopping SSH port tunnel",
+        Task::CreateSyncs { .. } => "Creating Mutagen syncs",
+        Task::RestoreSyncs { .. } => "Restoring Mutagen syncs",
+        Task::LoadSyncs => "Loading Mutagen syncs",
+        Task::DeleteSync { .. } => "Deleting Mutagen sync",
+        Task::CreateRsyncBind { .. } => "Creating RSYNC bind",
+        Task::RunRsync { direction, .. } => match direction {
+            RsyncDirection::Up => "Pushing files with rsync",
+            RsyncDirection::Down => "Pulling files with rsync",
+        },
+        Task::DeleteRsyncBind { .. } => "Deleting RSYNC bind",
+        Task::ListRemoteDirectories { .. } => "Listing remote directories",
+        Task::DeleteDropletSyncs { .. } => "Removing droplet Mutagen bindings",
+        Task::TerminateAllSyncs => "Terminating all Mutagen syncs",
+    }
+}
+
+fn pending_label_for_result(result: &TaskResult) -> &'static str {
+    match result {
+        TaskResult::DoctlCheck(_) => "Checking doctl authentication",
+        TaskResult::Droplets(_) => "Refreshing droplets",
+        TaskResult::Snapshots(_) => "Loading snapshots",
+        TaskResult::Regions(_) => "Loading regions",
+        TaskResult::Sizes(_) => "Loading sizes",
+        TaskResult::Images(_) => "Loading images",
+        TaskResult::SshKeys(_) => "Loading SSH keys",
+        TaskResult::CreateDroplet(_) => "Creating droplet",
+        TaskResult::RestoreDroplet(_) => "Restoring droplet",
+        TaskResult::SnapshotDelete(_) => "Snapshotting and deleting droplet",
+        TaskResult::DeleteDroplet(_) => "Deleting droplet",
+        TaskResult::StartTunnel(_) => "Starting SSH port tunnel",
+        TaskResult::StopTunnel(_) => "Stopping SSH port tunnel",
+        TaskResult::CreateSyncs(_) => "Creating Mutagen syncs",
+        TaskResult::RestoreSyncs(_) => "Restoring Mutagen syncs",
+        TaskResult::Syncs(_) => "Loading Mutagen syncs",
+        TaskResult::DeleteSync(_) => "Deleting Mutagen sync",
+        TaskResult::CreateRsyncBind(_) => "Creating RSYNC bind",
+        TaskResult::RunRsync(res) => match res {
+            Ok(outcome) => match outcome.direction {
+                RsyncDirection::Up => "Pushing files with rsync",
+                RsyncDirection::Down => "Pulling files with rsync",
+            },
+            Err(_) => "Running rsync",
+        },
+        TaskResult::DeleteRsyncBind(_) => "Deleting RSYNC bind",
+        TaskResult::RemoteDirectories { .. } => "Listing remote directories",
+        TaskResult::DeleteDropletSyncs(_) => "Removing droplet Mutagen bindings",
+        TaskResult::TerminateAllSyncs(_) => "Terminating all Mutagen syncs",
     }
 }
 

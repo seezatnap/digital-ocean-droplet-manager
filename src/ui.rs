@@ -14,8 +14,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use std::io;
 
 use crate::app::{
-    App, BindForm, CreateForm, Modal, Picker, RemoteBrowserForm, RestoreForm, Screen, SnapshotForm,
-    SyncForm, ToastLevel,
+    App, BindForm, CreateForm, DeleteRsyncBindForm, Modal, Notice, Picker, RemoteBrowserForm,
+    RestoreForm, RsyncBindActionsForm, RsyncBindForm, Screen, SnapshotForm, SyncForm, ToastLevel,
 };
 use crate::input::TextInput;
 use crate::ports;
@@ -119,6 +119,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Screen::Home => draw_home(frame, app, &theme),
         Screen::Bindings => draw_bindings(frame, app, &theme),
         Screen::Syncs => draw_syncs(frame, app, &theme),
+        Screen::RsyncBinds => draw_rsync_binds(frame, app, &theme),
     }
 
     if let Some(modal) = &app.modal {
@@ -126,6 +127,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 
     draw_toast(frame, app, &theme);
+    draw_loading_overlay(frame, app, &theme);
 }
 
 fn draw_home(frame: &mut Frame, app: &App, theme: &Theme) {
@@ -310,6 +312,89 @@ fn draw_syncs(frame: &mut Frame, app: &App, theme: &Theme) {
         Span::raw(" delete  "),
         Span::styled("g", Style::default().fg(theme.accent)),
         Span::raw(" refresh  "),
+        Span::styled("q", Style::default().fg(theme.accent)),
+        Span::raw(" back"),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.border)),
+    );
+    frame.render_widget(help, chunks[2]);
+}
+
+fn draw_rsync_binds(frame: &mut Frame, app: &App, theme: &Theme) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(frame.size());
+
+    let header = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
+        .title("RSYNC Binds")
+        .title_alignment(Alignment::Left);
+    let title = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "Remote <-> Local Bindings",
+            Style::default().fg(theme.accent),
+        ),
+        Span::raw("  (press q to return)"),
+    ]))
+    .block(header);
+    frame.render_widget(title, chunks[0]);
+
+    let items: Vec<ListItem> = if app.state.rsync_binds.is_empty() {
+        vec![ListItem::new(Line::from(vec![Span::styled(
+            "<no rsync binds>",
+            Style::default().fg(theme.muted),
+        )]))]
+    } else {
+        app.state
+            .rsync_binds
+            .iter()
+            .map(|bind| {
+                let line = Line::from(vec![
+                    Span::styled("• ", Style::default().fg(theme.muted)),
+                    Span::raw(format!("{}  ", bind.droplet_name)),
+                    Span::styled(
+                        format!("{}@{}:{} ", bind.ssh_user, bind.host, bind.remote_path),
+                        Style::default().fg(theme.accent),
+                    ),
+                    Span::raw(" -> "),
+                    Span::styled(&bind.local_path, Style::default().fg(theme.muted)),
+                ]);
+                ListItem::new(line)
+            })
+            .collect()
+    };
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border))
+                .title("Registry"),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(theme.accent)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let mut state = rsync_bind_state_list(app);
+    frame.render_stateful_widget(list, chunks[1], &mut state);
+
+    let help = Paragraph::new(Line::from(vec![
+        Span::styled("Enter", Style::default().fg(theme.accent)),
+        Span::raw(" open bind actions  "),
+        Span::styled("?", Style::default().fg(theme.accent)),
+        Span::raw(" shortcuts  "),
         Span::styled("q", Style::default().fg(theme.accent)),
         Span::raw(" back"),
     ]))
@@ -512,6 +597,10 @@ fn draw_droplet_details(frame: &mut Frame, app: &App, theme: &Theme, area: Rect)
             Span::styled("o", Style::default().fg(theme.accent)),
             Span::raw(" open remote folder"),
         ]),
+        Line::from(vec![
+            Span::styled("u", Style::default().fg(theme.accent)),
+            Span::raw(" rsync binds"),
+        ]),
     ];
 
     let content = lines
@@ -539,6 +628,8 @@ fn draw_footer(frame: &mut Frame, _app: &App, theme: &Theme, area: Rect) {
         Span::raw(" mutagen  "),
         Span::styled("o", Style::default().fg(theme.accent)),
         Span::raw(" open folder  "),
+        Span::styled("u", Style::default().fg(theme.accent)),
+        Span::raw(" rsync binds  "),
         Span::styled("d", Style::default().fg(theme.accent)),
         Span::raw(" delete  "),
         Span::styled("f", Style::default().fg(theme.accent)),
@@ -565,6 +656,10 @@ fn draw_modal(frame: &mut Frame, app: &App, modal: &Modal, theme: &Theme) {
         Modal::Sync(form) => draw_sync_modal(frame, form, theme, area),
         Modal::Mutagen(form) => draw_mutagen_modal(frame, app, form, theme, area),
         Modal::RemoteBrowser(form) => draw_remote_browser_modal(frame, form, theme, area),
+        Modal::RsyncBind(form) => draw_rsync_bind_modal(frame, form, theme, area),
+        Modal::RsyncBindActions(form) => draw_rsync_bind_actions_modal(frame, form, theme, area),
+        Modal::DeleteRsyncBind(form) => draw_delete_rsync_bind_modal(frame, form, theme, area),
+        Modal::Notice(notice) => draw_notice_modal(frame, notice, theme, area),
         Modal::Snapshot(form) => draw_snapshot_modal(frame, form, theme, area),
         Modal::Confirm(confirm) => draw_confirm_modal(frame, confirm, theme, area),
         Modal::Picker { picker, .. } => draw_picker_modal(frame, picker, theme, area),
@@ -981,7 +1076,7 @@ fn draw_remote_browser_modal(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
-        .title("Open Remote Folder (Cursor)")
+        .title("Remote Folder Browser")
         .title_alignment(Alignment::Left);
     frame.render_widget(block, area);
 
@@ -991,7 +1086,7 @@ fn draw_remote_browser_modal(
         .constraints([
             Constraint::Length(2),
             Constraint::Min(1),
-            Constraint::Length(2),
+            Constraint::Length(5),
         ])
         .split(inner);
 
@@ -1034,20 +1129,290 @@ fn draw_remote_browser_modal(
     }
     frame.render_stateful_widget(list, rows[1], &mut state);
 
+    let help = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled("Enter", Style::default().fg(theme.accent)),
+            Span::raw(" open dir  "),
+            Span::styled("Backspace", Style::default().fg(theme.accent)),
+            Span::raw(" up  "),
+            Span::styled("g", Style::default().fg(theme.accent)),
+            Span::raw(" refresh"),
+        ]),
+        Line::from(vec![
+            Span::styled("o", Style::default().fg(theme.accent)),
+            Span::raw(" open highlighted in Cursor"),
+        ]),
+        Line::from(vec![
+            Span::styled("m", Style::default().fg(theme.accent)),
+            Span::raw(" bind rsync to local folder  "),
+            Span::styled("Esc", Style::default().fg(theme.accent)),
+            Span::raw(" close"),
+        ]),
+    ])
+    .style(Style::default().fg(theme.muted))
+    .wrap(Wrap { trim: true });
+    frame.render_widget(help, rows[2]);
+}
+
+fn draw_rsync_bind_modal(frame: &mut Frame, form: &RsyncBindForm, theme: &Theme, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
+        .title("Bind RSYNC to Local Folder")
+        .title_alignment(Alignment::Left);
+    frame.render_widget(block, area);
+
+    let inner = inner_rect(area, 1);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(&form.droplet_name, Style::default().fg(theme.accent)),
+            Span::raw("  "),
+            Span::styled(&form.remote_path, Style::default().fg(theme.muted)),
+        ])),
+        rows[0],
+    );
+
+    let cursor = render_input_row(
+        frame,
+        "Local Folder",
+        &form.local_path,
+        form.focus == 0,
+        rows[1],
+        theme,
+    );
+    render_action_row(
+        frame,
+        "Bind + Open Finder",
+        "Cancel",
+        form.focus,
+        1,
+        rows[2],
+        theme,
+    );
+
     let help = Paragraph::new(Line::from(vec![
         Span::styled("Enter", Style::default().fg(theme.accent)),
-        Span::raw(" open dir  "),
-        Span::styled("Backspace", Style::default().fg(theme.accent)),
-        Span::raw(" up  "),
-        Span::styled("o", Style::default().fg(theme.accent)),
-        Span::raw(" open highlighted in Cursor  "),
-        Span::styled("g", Style::default().fg(theme.accent)),
-        Span::raw(" refresh  "),
+        Span::raw(" confirm  "),
+        Span::styled("Tab", Style::default().fg(theme.accent)),
+        Span::raw(" move  "),
         Span::styled("Esc", Style::default().fg(theme.accent)),
         Span::raw(" close"),
     ]))
     .style(Style::default().fg(theme.muted));
+    frame.render_widget(help, rows[3]);
+
+    if let Some((x, y)) = cursor {
+        frame.set_cursor(x, y);
+    }
+}
+
+fn draw_rsync_bind_actions_modal(
+    frame: &mut Frame,
+    form: &RsyncBindActionsForm,
+    theme: &Theme,
+    area: Rect,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
+        .title("RSYNC Bind Actions")
+        .title_alignment(Alignment::Left);
+    frame.render_widget(block, area);
+
+    let inner = inner_rect(area, 1);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(6),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    let info = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled("Droplet: ", Style::default().fg(theme.muted)),
+            Span::styled(&form.bind.droplet_name, Style::default().fg(theme.accent)),
+        ]),
+        Line::from(vec![
+            Span::styled("Remote:  ", Style::default().fg(theme.muted)),
+            Span::raw(format!(
+                "{}@{}:{}",
+                form.bind.ssh_user, form.bind.host, form.bind.remote_path
+            )),
+        ]),
+        Line::from(vec![
+            Span::styled("Local:   ", Style::default().fg(theme.muted)),
+            Span::raw(&form.bind.local_path),
+        ]),
+        Line::from(vec![
+            Span::styled("SSH:     ", Style::default().fg(theme.muted)),
+            Span::raw(format!(
+                "key={}  port={}",
+                form.bind.ssh_key_path, form.bind.ssh_port
+            )),
+        ]),
+        Line::from(vec![
+            Span::styled("Created: ", Style::default().fg(theme.muted)),
+            Span::raw(
+                form.bind
+                    .created_at
+                    .format("%Y-%m-%d %H:%M:%S UTC")
+                    .to_string(),
+            ),
+        ]),
+    ])
+    .wrap(Wrap { trim: true });
+    frame.render_widget(info, rows[0]);
+
+    let action_button = |label: &str, active: bool| {
+        if active {
+            Span::styled(
+                format!("[ {label} ]"),
+                Style::default()
+                    .bg(theme.accent)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(format!("[ {label} ]"), Style::default().fg(theme.muted))
+        }
+    };
+
+    let sync_actions = Paragraph::new(Line::from(vec![
+        Span::styled("Sync: ", Style::default().fg(theme.muted)),
+        action_button("Push Up", form.selected_action == 0),
+        Span::raw("  "),
+        action_button("Pull Down", form.selected_action == 1),
+    ]));
+    frame.render_widget(sync_actions, rows[1]);
+
+    let other_actions = Paragraph::new(Line::from(vec![
+        Span::styled("More: ", Style::default().fg(theme.muted)),
+        action_button("Open Finder", form.selected_action == 2),
+        Span::raw("  "),
+        action_button("Open iTerm", form.selected_action == 3),
+        Span::raw("  "),
+        action_button("Delete Bind", form.selected_action == 4),
+        Span::raw("  "),
+        action_button("Close", form.selected_action == 5),
+    ]))
+    .wrap(Wrap { trim: true });
+    frame.render_widget(other_actions, rows[2]);
+
+    let help = Paragraph::new(Line::from(vec![
+        Span::styled("Left/Right", Style::default().fg(theme.accent)),
+        Span::raw(" select  "),
+        Span::styled("Enter", Style::default().fg(theme.accent)),
+        Span::raw(" run action  "),
+        Span::styled("Esc", Style::default().fg(theme.accent)),
+        Span::raw(" close"),
+    ]))
+    .style(Style::default().fg(theme.muted));
+    frame.render_widget(help, rows[3]);
+}
+
+fn draw_delete_rsync_bind_modal(
+    frame: &mut Frame,
+    form: &DeleteRsyncBindForm,
+    theme: &Theme,
+    area: Rect,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
+        .title("Delete RSYNC Bind")
+        .title_alignment(Alignment::Left);
+    frame.render_widget(block, area);
+
+    let inner = inner_rect(area, 1);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    let summary = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled("Remote: ", Style::default().fg(theme.muted)),
+            Span::raw(format!(
+                "{}@{}:{}",
+                form.bind.ssh_user, form.bind.host, form.bind.remote_path
+            )),
+        ]),
+        Line::from(vec![
+            Span::styled("Local:  ", Style::default().fg(theme.muted)),
+            Span::raw(&form.bind.local_path),
+        ]),
+    ])
+    .wrap(Wrap { trim: true });
+    frame.render_widget(summary, rows[0]);
+
+    let checkbox = if form.delete_local_copy { "[x]" } else { "[ ]" };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(checkbox, Style::default().fg(theme.accent)),
+            Span::raw(" Also delete local copy"),
+        ])),
+        rows[1],
+    );
+
+    let help = Paragraph::new(Line::from(vec![
+        Span::styled("Space", Style::default().fg(theme.accent)),
+        Span::raw(" toggle  "),
+        Span::styled("Enter", Style::default().fg(theme.accent)),
+        Span::raw(" delete  "),
+        Span::styled("Esc", Style::default().fg(theme.accent)),
+        Span::raw(" cancel"),
+    ]))
+    .style(Style::default().fg(theme.muted));
     frame.render_widget(help, rows[2]);
+}
+
+fn draw_notice_modal(frame: &mut Frame, notice: &Notice, theme: &Theme, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
+        .title(notice.title.as_str())
+        .title_alignment(Alignment::Left);
+    frame.render_widget(block, area);
+
+    let inner = inner_rect(area, 1);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(notice.message.clone()).wrap(Wrap { trim: true }),
+        rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Enter", Style::default().fg(theme.accent)),
+            Span::raw(" close  "),
+            Span::styled("Esc", Style::default().fg(theme.accent)),
+            Span::raw(" close"),
+        ]))
+        .style(Style::default().fg(theme.muted)),
+        rows[1],
+    );
 }
 
 fn draw_snapshot_modal(frame: &mut Frame, form: &SnapshotForm, theme: &Theme, area: Rect) {
@@ -1318,6 +1683,42 @@ fn draw_toast(frame: &mut Frame, app: &App, theme: &Theme) {
     frame.render_widget(Paragraph::new(toast.message.clone()).style(style), rect);
 }
 
+fn draw_loading_overlay(frame: &mut Frame, app: &App, theme: &Theme) {
+    if app.pending == 0 {
+        return;
+    }
+
+    let frames = ["|", "/", "-", "\\"];
+    let spinner_idx = ((Utc::now().timestamp_subsec_millis() / 120) % frames.len() as u32) as usize;
+    let spinner = frames[spinner_idx];
+
+    let area = centered_rect(64, 34, frame.size());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent))
+        .title("Working")
+        .title_alignment(Alignment::Left);
+    frame.render_widget(block, area);
+
+    let inner = inner_rect(area, 1);
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(spinner, Style::default().fg(theme.accent)),
+        Span::raw(" "),
+        Span::styled("Please wait...", Style::default().fg(theme.accent)),
+    ]));
+    lines.push(Line::from(""));
+    for line in app.pending_overlay_lines() {
+        lines.push(Line::from(line));
+    }
+
+    let content = Paragraph::new(lines)
+        .style(Style::default().fg(theme.muted))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(content, inner);
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -1359,6 +1760,16 @@ fn app_state_list(app: &App) -> ratatui::widgets::ListState {
 fn binding_state_list(app: &App) -> ratatui::widgets::ListState {
     let mut state = ratatui::widgets::ListState::default();
     let max = app.state.bindings.len();
+    if max > 0 {
+        let selected = app.selected.min(max - 1);
+        state.select(Some(selected));
+    }
+    state
+}
+
+fn rsync_bind_state_list(app: &App) -> ratatui::widgets::ListState {
+    let mut state = ratatui::widgets::ListState::default();
+    let max = app.state.rsync_binds.len();
     if max > 0 {
         let selected = app.selected.min(max - 1);
         state.select(Some(selected));
