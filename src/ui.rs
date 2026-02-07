@@ -1,21 +1,21 @@
-use std::io;
+use anyhow::{Context, anyhow};
 use chrono::Utc;
-use anyhow::anyhow;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
-use crossterm::{execute, ExecutableCommand};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
+use crossterm::{ExecutableCommand, execute};
+use ratatui::Frame;
+use ratatui::Terminal;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem, Paragraph, Wrap,
-};
-use ratatui::Frame;
-use ratatui::Terminal;
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use std::io;
 
 use crate::app::{
-    App, BindForm, CreateForm, Modal, Picker, RestoreForm, Screen, SnapshotForm, SyncForm,
-    ToastLevel,
+    App, BindForm, CreateForm, Modal, Picker, RemoteBrowserForm, RestoreForm, Screen, SnapshotForm,
+    SyncForm, ToastLevel,
 };
 use crate::input::TextInput;
 use crate::ports;
@@ -44,7 +44,8 @@ impl Theme {
     }
 }
 
-pub fn setup_terminal() -> anyhow::Result<Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>> {
+pub fn setup_terminal() -> anyhow::Result<Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>>
+{
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -73,9 +74,7 @@ pub fn run_interactive(args: &[&str]) -> anyhow::Result<()> {
     stdout.execute(DisableMouseCapture)?;
     stdout.execute(crossterm::cursor::Show)?;
 
-    let status = std::process::Command::new("doctl")
-        .args(args)
-        .status()?;
+    let status = std::process::Command::new("doctl").args(args).status()?;
 
     stdout.execute(EnterAlternateScreen)?;
     stdout.execute(EnableMouseCapture)?;
@@ -88,13 +87,33 @@ pub fn run_interactive(args: &[&str]) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn run_external(program: &str, args: &[String]) -> anyhow::Result<()> {
+    disable_raw_mode()?;
+    let mut stdout = io::stdout();
+    stdout.execute(LeaveAlternateScreen)?;
+    stdout.execute(DisableMouseCapture)?;
+    stdout.execute(crossterm::cursor::Show)?;
+
+    let status = std::process::Command::new(program)
+        .args(args)
+        .status()
+        .with_context(|| format!("Failed to execute {program}"))?;
+
+    stdout.execute(EnterAlternateScreen)?;
+    stdout.execute(EnableMouseCapture)?;
+    stdout.execute(crossterm::cursor::Hide)?;
+    enable_raw_mode()?;
+
+    if !status.success() {
+        return Err(anyhow!("{program} command failed"));
+    }
+    Ok(())
+}
+
 pub fn draw(frame: &mut Frame, app: &App) {
     let theme = Theme::default();
     let area = frame.size();
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme.bg)),
-        area,
-    );
+    frame.render_widget(Block::default().style(Style::default().bg(theme.bg)), area);
 
     match app.screen {
         Screen::Home => draw_home(frame, app, &theme),
@@ -112,7 +131,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
 fn draw_home(frame: &mut Frame, app: &App, theme: &Theme) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(2)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
         .split(frame.size());
 
     draw_header(frame, app, theme, chunks[0]);
@@ -131,7 +154,11 @@ fn draw_home(frame: &mut Frame, app: &App, theme: &Theme) {
 fn draw_bindings(frame: &mut Frame, app: &App, theme: &Theme) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(2)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
         .split(frame.size());
 
     let header = Block::default()
@@ -201,14 +228,22 @@ fn draw_bindings(frame: &mut Frame, app: &App, theme: &Theme) {
         Span::styled("q", Style::default().fg(theme.accent)),
         Span::raw(" back"),
     ]))
-    .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.border)),
+    );
     frame.render_widget(help, chunks[2]);
 }
 
 fn draw_syncs(frame: &mut Frame, app: &App, theme: &Theme) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(2)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
         .split(frame.size());
 
     let header = Block::default()
@@ -278,13 +313,22 @@ fn draw_syncs(frame: &mut Frame, app: &App, theme: &Theme) {
         Span::styled("q", Style::default().fg(theme.accent)),
         Span::raw(" back"),
     ]))
-    .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.border)),
+    );
     frame.render_widget(help, chunks[2]);
 }
 
 fn draw_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let title = Line::from(vec![
-        Span::styled("DOCTL", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "DOCTL",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Droplet Manager"),
     ]);
 
@@ -299,7 +343,10 @@ fn draw_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         right.push(Span::styled("  *", Style::default().fg(theme.accent)));
     }
     if app.filter_running {
-        right.push(Span::styled("  [running]", Style::default().fg(theme.warning)));
+        right.push(Span::styled(
+            "  [running]",
+            Style::default().fg(theme.warning),
+        ));
     }
 
     let header = Paragraph::new(title)
@@ -429,14 +476,42 @@ fn draw_droplet_details(frame: &mut Frame, app: &App, theme: &Theme, area: Rect)
 
     let actions = vec![
         Line::from(""),
-        Line::from(vec![Span::styled("Enter", Style::default().fg(theme.accent)), Span::raw(" connect")]),
-        Line::from(vec![Span::styled("c", Style::default().fg(theme.accent)), Span::raw(" create")]),
-        Line::from(vec![Span::styled("s", Style::default().fg(theme.accent)), Span::raw(" snapshot+delete")]),
-        Line::from(vec![Span::styled("d", Style::default().fg(theme.accent)), Span::raw(" delete")]),
-        Line::from(vec![Span::styled("r", Style::default().fg(theme.accent)), Span::raw(" restore")]),
-        Line::from(vec![Span::styled("b", Style::default().fg(theme.accent)), Span::raw(" bind port")]),
-        Line::from(vec![Span::styled("p", Style::default().fg(theme.accent)), Span::raw(" port bindings")]),
-        Line::from(vec![Span::styled("m", Style::default().fg(theme.accent)), Span::raw(" mutagen config")]),
+        Line::from(vec![
+            Span::styled("Enter", Style::default().fg(theme.accent)),
+            Span::raw(" connect"),
+        ]),
+        Line::from(vec![
+            Span::styled("c", Style::default().fg(theme.accent)),
+            Span::raw(" create"),
+        ]),
+        Line::from(vec![
+            Span::styled("s", Style::default().fg(theme.accent)),
+            Span::raw(" snapshot+delete"),
+        ]),
+        Line::from(vec![
+            Span::styled("d", Style::default().fg(theme.accent)),
+            Span::raw(" delete"),
+        ]),
+        Line::from(vec![
+            Span::styled("r", Style::default().fg(theme.accent)),
+            Span::raw(" restore"),
+        ]),
+        Line::from(vec![
+            Span::styled("b", Style::default().fg(theme.accent)),
+            Span::raw(" bind port"),
+        ]),
+        Line::from(vec![
+            Span::styled("p", Style::default().fg(theme.accent)),
+            Span::raw(" port bindings"),
+        ]),
+        Line::from(vec![
+            Span::styled("m", Style::default().fg(theme.accent)),
+            Span::raw(" mutagen config"),
+        ]),
+        Line::from(vec![
+            Span::styled("o", Style::default().fg(theme.accent)),
+            Span::raw(" open remote folder"),
+        ]),
     ];
 
     let content = lines
@@ -448,7 +523,12 @@ fn draw_droplet_details(frame: &mut Frame, app: &App, theme: &Theme, area: Rect)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
         .title("Details");
-    frame.render_widget(Paragraph::new(content).block(block).wrap(Wrap { trim: true }), area);
+    frame.render_widget(
+        Paragraph::new(content)
+            .block(block)
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn draw_footer(frame: &mut Frame, _app: &App, theme: &Theme, area: Rect) {
@@ -457,6 +537,8 @@ fn draw_footer(frame: &mut Frame, _app: &App, theme: &Theme, area: Rect) {
         Span::raw(" refresh  "),
         Span::styled("m", Style::default().fg(theme.accent)),
         Span::raw(" mutagen  "),
+        Span::styled("o", Style::default().fg(theme.accent)),
+        Span::raw(" open folder  "),
         Span::styled("d", Style::default().fg(theme.accent)),
         Span::raw(" delete  "),
         Span::styled("f", Style::default().fg(theme.accent)),
@@ -482,18 +564,14 @@ fn draw_modal(frame: &mut Frame, app: &App, modal: &Modal, theme: &Theme) {
         Modal::Bind(form) => draw_bind_modal(frame, form, theme, area),
         Modal::Sync(form) => draw_sync_modal(frame, form, theme, area),
         Modal::Mutagen(form) => draw_mutagen_modal(frame, app, form, theme, area),
+        Modal::RemoteBrowser(form) => draw_remote_browser_modal(frame, form, theme, area),
         Modal::Snapshot(form) => draw_snapshot_modal(frame, form, theme, area),
         Modal::Confirm(confirm) => draw_confirm_modal(frame, confirm, theme, area),
         Modal::Picker { picker, .. } => draw_picker_modal(frame, picker, theme, area),
     }
 }
 
-fn draw_create_modal(
-    frame: &mut Frame,
-    form: &CreateForm,
-    theme: &Theme,
-    area: Rect,
-) {
+fn draw_create_modal(frame: &mut Frame, form: &CreateForm, theme: &Theme, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
@@ -518,8 +596,8 @@ fn draw_create_modal(
 
     let mut cursor = None;
 
-    cursor = render_input_row(frame, "Name", &form.name, form.focus == 0, rows[0], theme)
-        .or(cursor);
+    cursor =
+        render_input_row(frame, "Name", &form.name, form.focus == 0, rows[0], theme).or(cursor);
     render_select_row(
         frame,
         "Region",
@@ -553,8 +631,8 @@ fn draw_create_modal(
         rows[4],
         theme,
     );
-    cursor = render_input_row(frame, "Tags", &form.tags, form.focus == 5, rows[5], theme)
-        .or(cursor);
+    cursor =
+        render_input_row(frame, "Tags", &form.tags, form.focus == 5, rows[5], theme).or(cursor);
     render_action_row(frame, "Create", "Cancel", form.focus, 6, rows[6], theme);
 
     let help = Paragraph::new(Line::from(vec![
@@ -573,12 +651,7 @@ fn draw_create_modal(
     }
 }
 
-fn draw_restore_modal(
-    frame: &mut Frame,
-    form: &RestoreForm,
-    theme: &Theme,
-    area: Rect,
-) {
+fn draw_restore_modal(frame: &mut Frame, form: &RestoreForm, theme: &Theme, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
@@ -602,8 +675,8 @@ fn draw_restore_modal(
         .split(inner);
 
     let mut cursor = None;
-    cursor = render_input_row(frame, "Name", &form.name, form.focus == 0, rows[0], theme)
-        .or(cursor);
+    cursor =
+        render_input_row(frame, "Name", &form.name, form.focus == 0, rows[0], theme).or(cursor);
     render_select_row(
         frame,
         "Snapshot",
@@ -637,8 +710,8 @@ fn draw_restore_modal(
         rows[4],
         theme,
     );
-    cursor = render_input_row(frame, "Tags", &form.tags, form.focus == 5, rows[5], theme)
-        .or(cursor);
+    cursor =
+        render_input_row(frame, "Tags", &form.tags, form.focus == 5, rows[5], theme).or(cursor);
     render_action_row(frame, "Restore", "Cancel", form.focus, 6, rows[6], theme);
 
     let help = Paragraph::new(Line::from(vec![
@@ -846,7 +919,11 @@ fn draw_mutagen_modal(
     let inner = inner_rect(area, 1);
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(1), Constraint::Length(2)])
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(2),
+        ])
         .split(inner);
 
     let header = Paragraph::new(Line::from(vec![
@@ -895,12 +972,85 @@ fn draw_mutagen_modal(
     frame.render_widget(help, rows[2]);
 }
 
-fn draw_snapshot_modal(
+fn draw_remote_browser_modal(
     frame: &mut Frame,
-    form: &SnapshotForm,
+    form: &RemoteBrowserForm,
     theme: &Theme,
     area: Rect,
 ) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
+        .title("Open Remote Folder (Cursor)")
+        .title_alignment(Alignment::Left);
+    frame.render_widget(block, area);
+
+    let inner = inner_rect(area, 1);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(2),
+        ])
+        .split(inner);
+
+    let header = Paragraph::new(Line::from(vec![
+        Span::styled(&form.droplet_name, Style::default().fg(theme.accent)),
+        Span::raw("  "),
+        Span::styled(&form.current_path, Style::default().fg(theme.muted)),
+        if form.loading {
+            Span::styled("  loading...", Style::default().fg(theme.warning))
+        } else {
+            Span::raw("")
+        },
+    ]));
+    frame.render_widget(header, rows[0]);
+
+    let items: Vec<ListItem> = if form.entries.is_empty() && !form.loading {
+        vec![ListItem::new(Line::from(vec![Span::styled(
+            "<no directories>",
+            Style::default().fg(theme.muted),
+        )]))]
+    } else {
+        form.entries
+            .iter()
+            .map(|entry| ListItem::new(Line::from(entry.label.clone())))
+            .collect()
+    };
+
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title("Directories"))
+        .highlight_style(
+            Style::default()
+                .bg(theme.accent)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let mut state = ratatui::widgets::ListState::default();
+    if !form.entries.is_empty() {
+        state.select(Some(form.selected.min(form.entries.len() - 1)));
+    }
+    frame.render_stateful_widget(list, rows[1], &mut state);
+
+    let help = Paragraph::new(Line::from(vec![
+        Span::styled("Enter", Style::default().fg(theme.accent)),
+        Span::raw(" open dir  "),
+        Span::styled("Backspace", Style::default().fg(theme.accent)),
+        Span::raw(" up  "),
+        Span::styled("o", Style::default().fg(theme.accent)),
+        Span::raw(" open highlighted in Cursor  "),
+        Span::styled("g", Style::default().fg(theme.accent)),
+        Span::raw(" refresh  "),
+        Span::styled("Esc", Style::default().fg(theme.accent)),
+        Span::raw(" close"),
+    ]))
+    .style(Style::default().fg(theme.muted));
+    frame.render_widget(help, rows[2]);
+}
+
+fn draw_snapshot_modal(frame: &mut Frame, form: &SnapshotForm, theme: &Theme, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
@@ -911,7 +1061,11 @@ fn draw_snapshot_modal(
     let inner = inner_rect(area, 1);
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Length(2), Constraint::Min(1)])
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Min(1),
+        ])
         .split(inner);
 
     let header = Paragraph::new(Line::from(vec![
@@ -920,8 +1074,14 @@ fn draw_snapshot_modal(
     ]));
     frame.render_widget(header, rows[0]);
 
-    let cursor =
-        render_input_row(frame, "Snapshot Name", &form.snapshot_name, true, rows[1], theme);
+    let cursor = render_input_row(
+        frame,
+        "Snapshot Name",
+        &form.snapshot_name,
+        true,
+        rows[1],
+        theme,
+    );
 
     let help = Paragraph::new(Line::from(vec![
         Span::styled("Enter", Style::default().fg(theme.accent)),
@@ -936,12 +1096,7 @@ fn draw_snapshot_modal(
     }
 }
 
-fn draw_confirm_modal(
-    frame: &mut Frame,
-    confirm: &crate::app::Confirm,
-    theme: &Theme,
-    area: Rect,
-) {
+fn draw_confirm_modal(frame: &mut Frame, confirm: &crate::app::Confirm, theme: &Theme, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
@@ -967,12 +1122,7 @@ fn draw_confirm_modal(
     frame.render_widget(help, rows[1]);
 }
 
-fn draw_picker_modal(
-    frame: &mut Frame,
-    picker: &Picker,
-    theme: &Theme,
-    area: Rect,
-) {
+fn draw_picker_modal(frame: &mut Frame, picker: &Picker, theme: &Theme, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
@@ -983,7 +1133,11 @@ fn draw_picker_modal(
     let inner = inner_rect(area, 1);
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(1), Constraint::Length(2)])
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(2),
+        ])
         .split(inner);
 
     let label = "Search: ";
@@ -993,8 +1147,7 @@ fn draw_picker_modal(
     ]))
     .block(Block::default().borders(Borders::ALL).title("Filter"));
     frame.render_widget(query, rows[0]);
-    let cursor_x =
-        rows[0].x + 1 + label.len() as u16 + picker.query.cursor_display_offset() as u16;
+    let cursor_x = rows[0].x + 1 + label.len() as u16 + picker.query.cursor_display_offset() as u16;
     let cursor_y = rows[0].y + 1;
     frame.set_cursor(cursor_x, cursor_y);
 
@@ -1004,11 +1157,13 @@ fn draw_picker_modal(
         .filter_map(|idx| picker.items.get(*idx))
         .map(|item| {
             let marker = if picker.multi {
-                if picker
-                    .chosen
-                    .iter()
-                    .any(|chosen| picker.items.get(*chosen).map(|i| i.value == item.value).unwrap_or(false))
-                {
+                if picker.chosen.iter().any(|chosen| {
+                    picker
+                        .items
+                        .get(*chosen)
+                        .map(|i| i.value == item.value)
+                        .unwrap_or(false)
+                }) {
                     "[x]"
                 } else {
                     "[ ]"
@@ -1118,12 +1273,16 @@ fn render_action_row(
     theme: &Theme,
 ) {
     let submit_style = if focus == submit_index {
-        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.muted)
     };
     let cancel_style = if focus == submit_index + 1 {
-        Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.warning)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.muted)
     };

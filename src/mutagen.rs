@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 
 #[derive(Debug, Clone)]
@@ -32,6 +32,12 @@ pub struct DeleteSyncOutcome {
     pub name: String,
     pub mount_removed: bool,
     pub mount_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeleteDropletSyncsOutcome {
+    pub terminated: usize,
+    pub mount_removed: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +171,47 @@ pub fn delete_sync(name: &str, ssh: Option<&SshConfig>) -> Result<DeleteSyncOutc
     })
 }
 
+pub fn delete_syncs_for_droplet(
+    ssh: &SshConfig,
+    droplet_name: &str,
+) -> Result<DeleteDropletSyncsOutcome> {
+    let sessions = list_syncs()?;
+    let mount_entries = read_mountlist(ssh)?;
+    let mount_names: HashSet<String> = mount_entries
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect();
+
+    let droplet_prefix = format!("sync-{}-", sanitize_name(droplet_name));
+    let target_host = normalized_host(&ssh.host);
+    let mut target_names = HashSet::new();
+    for session in sessions {
+        let host_match = session
+            .beta_host
+            .as_deref()
+            .map(|host| normalized_host(host) == target_host)
+            .unwrap_or(false);
+        if host_match
+            || mount_names.contains(&session.name)
+            || session.name.starts_with(&droplet_prefix)
+        {
+            target_names.insert(session.name);
+        }
+    }
+
+    for name in &target_names {
+        terminate_sync(name)?;
+    }
+
+    let mount_names: Vec<String> = mount_entries.into_iter().map(|entry| entry.name).collect();
+    let mount_removed = delete_mount_entries(ssh, &mount_names)?;
+
+    Ok(DeleteDropletSyncsOutcome {
+        terminated: target_names.len(),
+        mount_removed,
+    })
+}
+
 pub fn terminate_all_syncs() -> Result<usize> {
     let sessions = list_syncs()?;
     let mut count = 0usize;
@@ -191,14 +238,7 @@ fn mutagen_existing_names() -> Result<HashSet<String>> {
 
 fn mutagen_create(ssh: &SshConfig, name: &str, local: &str, remote: &str) -> Result<()> {
     let remote_target = format!("{}@{}:{}", ssh.user, ssh.host, remote);
-    run_mutagen(&[
-        "sync",
-        "create",
-        "--name",
-        name,
-        local,
-        &remote_target,
-    ])?;
+    run_mutagen(&["sync", "create", "--name", name, local, &remote_target])?;
     Ok(())
 }
 
@@ -266,9 +306,7 @@ fn sessions_from_json(raw: &str) -> Result<Vec<SyncSession>> {
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string())
                     });
-                let beta_host = beta_url
-                    .as_deref()
-                    .and_then(parse_host_from_url);
+                let beta_host = beta_url.as_deref().and_then(parse_host_from_url);
                 sessions.push(SyncSession {
                     name: name.to_string(),
                     status,
@@ -424,6 +462,13 @@ fn parse_host_from_url(url: &str) -> Option<String> {
     }
 }
 
+fn normalized_host(host: &str) -> String {
+    host.trim()
+        .trim_matches('[')
+        .trim_matches(']')
+        .to_lowercase()
+}
+
 fn read_mountlist(ssh: &SshConfig) -> Result<Vec<MountEntry>> {
     let output = run_ssh(ssh, "cat ~/.mountlist 2>/dev/null || true")?;
     Ok(parse_mountlist(&output))
@@ -441,7 +486,10 @@ pub fn delete_mount_entries(ssh: &SshConfig, names: &[String]) -> Result<usize> 
     for name in names {
         remove.insert(name.as_str());
     }
-    let removed = entries.iter().filter(|entry| remove.contains(entry.name.as_str())).count();
+    let removed = entries
+        .iter()
+        .filter(|entry| remove.contains(entry.name.as_str()))
+        .count();
     if removed == 0 {
         return Ok(0);
     }
@@ -555,7 +603,6 @@ fn generate_sync_name(droplet_name: &str, local: &str, index: usize) -> String {
         format!("sync-{}-{}-{}", droplet, base, stamp)
     }
 }
-
 
 fn sanitize_name(input: &str) -> String {
     let mut out = String::with_capacity(input.len());

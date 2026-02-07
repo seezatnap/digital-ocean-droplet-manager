@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde::de::{Error as DeError, Unexpected, Visitor};
 
@@ -49,7 +49,6 @@ struct SnapshotApi {
     #[serde(deserialize_with = "de_f64")]
     size_gigabytes: f64,
 }
-
 
 #[derive(Debug, Deserialize)]
 struct SizeListApi {
@@ -204,13 +203,7 @@ pub fn list_droplets() -> Result<Vec<Droplet>> {
 }
 
 pub fn list_snapshots() -> Result<Vec<Snapshot>> {
-    let raw = run_doctl_json(&[
-        "compute",
-        "snapshot",
-        "list",
-        "--resource",
-        "droplet",
-    ])?;
+    let raw = run_doctl_json(&["compute", "snapshot", "list", "--resource", "droplet"])?;
     let api: Vec<SnapshotApi> = serde_json::from_value(raw)?;
     Ok(api
         .into_iter()

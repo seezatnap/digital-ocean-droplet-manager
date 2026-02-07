@@ -11,6 +11,7 @@ A fast, keyboard-driven terminal UI for managing DigitalOcean droplets using `do
 - Delete droplets without snapshot (explicit confirmation).
 - Bind local ports to droplet ports with SSH tunnels and collision prevention.
 - Sync local folders to droplets with Mutagen (persisted in `~/.mountlist` on the droplet).
+- Browse remote folders in the TUI and open them in Cursor over SSH remote.
 
 ## Requirements
 - `doctl` installed and authenticated.
@@ -30,7 +31,8 @@ cargo run
 - `s` snapshot + delete droplet
 - `d` delete droplet (no snapshot)
 - `b` bind local port to droplet port
-- `m` Mutagen config (sync, restore, list, disable)
+- `m` Mutagen config (sync, restore, list, remove droplet bindings, disable)
+- `o` open remote folder browser (then open selected path in Cursor)
 - `Enter` connect to selected droplet
 - `p` port bindings
 - `f` toggle running-only filter

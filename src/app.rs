@@ -130,6 +130,22 @@ pub struct MutagenConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct RemoteBrowserEntry {
+    pub label: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteBrowserForm {
+    pub droplet_name: String,
+    pub ssh: SshConfig,
+    pub current_path: String,
+    pub entries: Vec<RemoteBrowserEntry>,
+    pub selected: usize,
+    pub loading: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct Confirm {
     pub title: String,
     pub message: String,
@@ -138,9 +154,20 @@ pub struct Confirm {
 
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
-    SnapshotDelete { droplet_id: u64, snapshot_name: String },
-    DeleteDroplet { droplet_id: u64 },
-    RestoreSyncs { ssh: SshConfig },
+    SnapshotDelete {
+        droplet_id: u64,
+        snapshot_name: String,
+    },
+    DeleteDroplet {
+        droplet_id: u64,
+    },
+    RestoreSyncs {
+        ssh: SshConfig,
+    },
+    RemoveDropletSyncs {
+        ssh: SshConfig,
+        droplet_name: String,
+    },
     DisableMutagen,
 }
 
@@ -151,6 +178,7 @@ pub enum Modal {
     Bind(BindForm),
     Sync(SyncForm),
     Mutagen(MutagenConfig),
+    RemoteBrowser(RemoteBrowserForm),
     Snapshot(SnapshotForm),
     Picker { picker: Picker, parent: Box<Modal> },
     Confirm(Confirm),
@@ -352,10 +380,7 @@ impl App {
             TaskResult::RestoreSyncs(res) => match res {
                 Ok(count) => {
                     self.push_toast(
-                        format!(
-                            "Restored {count} sync{}",
-                            if count == 1 { "" } else { "s" }
-                        ),
+                        format!("Restored {count} sync{}", if count == 1 { "" } else { "s" }),
                         ToastLevel::Success,
                     );
                 }
@@ -386,6 +411,54 @@ impl App {
                     } else {
                         self.push_toast(
                             format!("Sync '{}' deleted", outcome.name),
+                            ToastLevel::Success,
+                        );
+                    }
+                    self.spawn(Task::LoadSyncs);
+                }
+                Err(err) => self.push_toast(err.to_string(), ToastLevel::Error),
+            },
+            TaskResult::RemoteDirectories {
+                requested_path,
+                result,
+            } => match result {
+                Ok(listing) => {
+                    if let Some(Modal::RemoteBrowser(form)) = &mut self.modal {
+                        if form.current_path != requested_path {
+                            return;
+                        }
+                        form.current_path = listing.path.clone();
+                        form.entries =
+                            build_remote_browser_entries(&listing.path, listing.directories);
+                        form.selected = 0;
+                        form.loading = false;
+                    }
+                }
+                Err(err) => {
+                    if let Some(Modal::RemoteBrowser(form)) = &mut self.modal {
+                        if form.current_path == requested_path {
+                            form.loading = false;
+                        }
+                    }
+                    self.push_toast(err.to_string(), ToastLevel::Error);
+                }
+            },
+            TaskResult::DeleteDropletSyncs(res) => match res {
+                Ok(outcome) => {
+                    if outcome.terminated == 0 && outcome.mount_removed == 0 {
+                        self.push_toast(
+                            "No Mutagen bindings found for selected droplet",
+                            ToastLevel::Info,
+                        );
+                    } else {
+                        self.push_toast(
+                            format!(
+                                "Removed {} sync{} and {} mount binding{}",
+                                outcome.terminated,
+                                if outcome.terminated == 1 { "" } else { "s" },
+                                outcome.mount_removed,
+                                if outcome.mount_removed == 1 { "" } else { "s" }
+                            ),
                             ToastLevel::Success,
                         );
                     }
@@ -432,6 +505,7 @@ impl App {
             KeyCode::Char('d') => self.open_delete_modal(),
             KeyCode::Char('b') => self.open_bind_modal(),
             KeyCode::Char('m') => self.open_mutagen_modal(),
+            KeyCode::Char('o') => self.open_remote_browser(),
             KeyCode::Char('p') => {
                 self.screen = Screen::Bindings;
                 self.selected = 0;
@@ -502,6 +576,11 @@ impl App {
                     self.modal = Some(Modal::Mutagen(form));
                 }
             }
+            Modal::RemoteBrowser(mut form) => {
+                if self.handle_remote_browser_key(&mut form, key) {
+                    self.modal = Some(Modal::RemoteBrowser(form));
+                }
+            }
             Modal::Snapshot(mut form) => {
                 if self.handle_snapshot_key(&mut form, key) {
                     self.modal = Some(Modal::Snapshot(form));
@@ -537,15 +616,27 @@ impl App {
                 match form.focus {
                     0 => form.focus = 1,
                     1 => {
-                        self.open_picker(PickerTarget::CreateRegion, Modal::Create(form.clone()), vec![]);
+                        self.open_picker(
+                            PickerTarget::CreateRegion,
+                            Modal::Create(form.clone()),
+                            vec![],
+                        );
                         return false;
                     }
                     2 => {
-                        self.open_picker(PickerTarget::CreateSize, Modal::Create(form.clone()), vec![]);
+                        self.open_picker(
+                            PickerTarget::CreateSize,
+                            Modal::Create(form.clone()),
+                            vec![],
+                        );
                         return false;
                     }
                     3 => {
-                        self.open_picker(PickerTarget::CreateImage, Modal::Create(form.clone()), vec![]);
+                        self.open_picker(
+                            PickerTarget::CreateImage,
+                            Modal::Create(form.clone()),
+                            vec![],
+                        );
                         return false;
                     }
                     4 => {
@@ -768,6 +859,53 @@ impl App {
         true
     }
 
+    fn handle_remote_browser_key(&mut self, form: &mut RemoteBrowserForm, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.modal = None;
+                return false;
+            }
+            _ if form.loading => return true,
+            KeyCode::Up => {
+                if form.selected > 0 {
+                    form.selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if form.selected + 1 < form.entries.len() {
+                    form.selected += 1;
+                }
+            }
+            KeyCode::Backspace => {
+                if form.current_path != "/" {
+                    let parent = remote_parent_path(&form.current_path);
+                    self.browse_remote_path(form, parent);
+                }
+                return true;
+            }
+            KeyCode::Char('g') => {
+                self.browse_remote_path(form, form.current_path.clone());
+                return true;
+            }
+            KeyCode::Enter => {
+                if let Some(entry) = form.entries.get(form.selected) {
+                    self.browse_remote_path(form, entry.path.clone());
+                }
+                return true;
+            }
+            KeyCode::Char('o') => {
+                if let Some(entry) = form.entries.get(form.selected) {
+                    self.open_cursor_remote_folder(form, entry.path.clone());
+                    return false;
+                }
+                self.push_toast("No folder selected", ToastLevel::Warning);
+                return true;
+            }
+            _ => {}
+        }
+        true
+    }
+
     fn handle_snapshot_key(&mut self, form: &mut SnapshotForm, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc => {
@@ -864,6 +1002,10 @@ impl App {
                     self.spawn(Task::RestoreSyncs { ssh });
                     self.modal = None;
                 }
+                ConfirmAction::RemoveDropletSyncs { ssh, droplet_name } => {
+                    self.spawn(Task::DeleteDropletSyncs { ssh, droplet_name });
+                    self.modal = None;
+                }
                 ConfirmAction::DisableMutagen => {
                     self.spawn(Task::TerminateAllSyncs);
                     self.modal = None;
@@ -940,6 +1082,29 @@ impl App {
     fn open_mutagen_modal(&mut self) {
         let form = MutagenConfig { selected: 0 };
         self.modal = Some(Modal::Mutagen(form));
+    }
+
+    fn open_remote_browser(&mut self) {
+        let droplet_name = self
+            .selected_droplet()
+            .map(|droplet| droplet.name.clone())
+            .unwrap_or_else(|| "droplet".to_string());
+        match self.selected_ssh_config() {
+            Ok(ssh) => {
+                let mut form = RemoteBrowserForm {
+                    droplet_name,
+                    ssh,
+                    current_path: "~".to_string(),
+                    entries: Vec::new(),
+                    selected: 0,
+                    loading: false,
+                };
+                let path = form.current_path.clone();
+                self.browse_remote_path(&mut form, path);
+                self.modal = Some(Modal::RemoteBrowser(form));
+            }
+            Err(err) => self.push_toast(err.to_string(), ToastLevel::Warning),
+        }
     }
 
     fn open_sync_modal(&mut self) {
@@ -1024,7 +1189,10 @@ impl App {
         let (title, items, multi) = match target {
             PickerTarget::CreateRegion | PickerTarget::RestoreRegion => {
                 if self.regions.is_empty() {
-                    self.push_toast("No regions loaded (press g to refresh)", ToastLevel::Warning);
+                    self.push_toast(
+                        "No regions loaded (press g to refresh)",
+                        ToastLevel::Warning,
+                    );
                     return;
                 }
                 let mut available: Vec<&Region> =
@@ -1075,10 +1243,7 @@ impl App {
                                 .map(|slug| format!(" ({slug})"))
                                 .unwrap_or_default()
                         ),
-                        value: image
-                            .slug
-                            .clone()
-                            .unwrap_or_else(|| image.id.to_string()),
+                        value: image.slug.clone().unwrap_or_else(|| image.id.to_string()),
                         meta: image.distribution.clone(),
                     })
                     .collect();
@@ -1341,15 +1506,38 @@ impl App {
                     .unwrap_or_else(|| "droplet".to_string());
                 let confirm = Confirm {
                     title: "Restore Syncs".to_string(),
-                    message: format!(
-                        "Restore syncs from ~/.mountlist for droplet '{name}'?"
-                    ),
+                    message: format!("Restore syncs from ~/.mountlist for droplet '{name}'?"),
                     action: ConfirmAction::RestoreSyncs { ssh },
                 };
                 self.modal = Some(Modal::Confirm(confirm));
             }
             Err(err) => self.push_toast(err.to_string(), ToastLevel::Warning),
         }
+    }
+
+    fn browse_remote_path(&mut self, form: &mut RemoteBrowserForm, path: String) {
+        form.current_path = path.clone();
+        form.loading = true;
+        form.selected = 0;
+        self.spawn(Task::ListRemoteDirectories {
+            ssh: form.ssh.clone(),
+            path,
+        });
+    }
+
+    fn open_cursor_remote_folder(&mut self, form: &RemoteBrowserForm, selected_path: String) {
+        let remote = format!("ssh-remote+{}@{}", form.ssh.user, form.ssh.host);
+        let args = vec!["--remote".to_string(), remote, selected_path.clone()];
+        if let Err(err) = crate::ui::run_external("cursor", &args) {
+            self.push_toast(err.to_string(), ToastLevel::Error);
+        } else {
+            self.push_toast(
+                format!("Opened '{}' in Cursor", selected_path),
+                ToastLevel::Success,
+            );
+            self.modal = None;
+        }
+        self.terminal_reset = true;
     }
 
     fn move_selection(&mut self, delta: i32) {
@@ -1419,13 +1607,19 @@ impl App {
 
     fn cleanup_stale(&mut self) {
         let before = self.state.bindings.len();
-        self.state
-            .bindings
-            .retain(|binding| binding.tunnel_pid.map(ports::is_pid_running).unwrap_or(false));
+        self.state.bindings.retain(|binding| {
+            binding
+                .tunnel_pid
+                .map(ports::is_pid_running)
+                .unwrap_or(false)
+        });
         let removed = before.saturating_sub(self.state.bindings.len());
         if removed > 0 {
             let _ = config::save_state(&self.state);
-            self.push_toast(format!("Removed {removed} stale bindings"), ToastLevel::Info);
+            self.push_toast(
+                format!("Removed {removed} stale bindings"),
+                ToastLevel::Info,
+            );
         } else {
             self.push_toast("No stale bindings found", ToastLevel::Info);
         }
@@ -1463,7 +1657,10 @@ impl App {
         }
         if let Some(sync) = self.syncs.get(self.selected).cloned() {
             let ssh = self.syncs_context.clone();
-            self.spawn(Task::DeleteSync { name: sync.name, ssh });
+            self.spawn(Task::DeleteSync {
+                name: sync.name,
+                ssh,
+            });
         }
     }
 
@@ -1514,6 +1711,12 @@ impl App {
                 enabled: droplet_ready,
                 disabled_hint: "Select a running droplet with a public IP".to_string(),
             },
+            MutagenAction {
+                label: "Droplet: Remove All Bindings".to_string(),
+                kind: MutagenActionKind::RemoveDropletSyncs,
+                enabled: droplet_ready,
+                disabled_hint: "Select a running droplet with a public IP".to_string(),
+            },
         ]
     }
 
@@ -1521,6 +1724,7 @@ impl App {
         match kind {
             MutagenActionKind::AddSync => self.open_sync_modal(),
             MutagenActionKind::RestoreSyncs => self.restore_syncs(),
+            MutagenActionKind::RemoveDropletSyncs => self.remove_droplet_syncs(),
             MutagenActionKind::ListSyncs => self.open_syncs_screen_global(),
             MutagenActionKind::DisableMutagen => {
                 let confirm = Confirm {
@@ -1530,6 +1734,26 @@ impl App {
                 };
                 self.modal = Some(Modal::Confirm(confirm));
             }
+        }
+    }
+
+    fn remove_droplet_syncs(&mut self) {
+        let droplet_name = self
+            .selected_droplet()
+            .map(|droplet| droplet.name.clone())
+            .unwrap_or_else(|| "droplet".to_string());
+        match self.selected_ssh_config() {
+            Ok(ssh) => {
+                let confirm = Confirm {
+                    title: "Remove Mutagen Bindings".to_string(),
+                    message: format!(
+                        "Remove all Mutagen bindings for droplet '{droplet_name}'?\nThis terminates matching syncs and clears ~/.mountlist on the droplet."
+                    ),
+                    action: ConfirmAction::RemoveDropletSyncs { ssh, droplet_name },
+                };
+                self.modal = Some(Modal::Confirm(confirm));
+            }
+            Err(err) => self.push_toast(err.to_string(), ToastLevel::Warning),
         }
     }
 
@@ -1662,12 +1886,53 @@ fn split_csv(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn build_remote_browser_entries(path: &str, directories: Vec<String>) -> Vec<RemoteBrowserEntry> {
+    let mut entries = Vec::new();
+    if path != "/" {
+        entries.push(RemoteBrowserEntry {
+            label: "../".to_string(),
+            path: remote_parent_path(path),
+        });
+    }
+    for dir in directories {
+        entries.push(RemoteBrowserEntry {
+            label: format!("{dir}/"),
+            path: join_remote_path(path, &dir),
+        });
+    }
+    entries
+}
+
+fn remote_parent_path(path: &str) -> String {
+    if path == "/" {
+        return "/".to_string();
+    }
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "/".to_string();
+    }
+    match trimmed.rfind('/') {
+        Some(0) => "/".to_string(),
+        Some(pos) => trimmed[..pos].to_string(),
+        None => "/".to_string(),
+    }
+}
+
+fn join_remote_path(base: &str, child: &str) -> String {
+    if base == "/" {
+        format!("/{child}")
+    } else {
+        format!("{}/{}", base.trim_end_matches('/'), child)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum MutagenActionKind {
     ListSyncs,
     DisableMutagen,
     AddSync,
     RestoreSyncs,
+    RemoveDropletSyncs,
 }
 
 #[derive(Debug, Clone)]
@@ -1706,7 +1971,6 @@ fn parse_sync_paths(value: &str) -> anyhow::Result<Vec<SyncPath>> {
     }
     Ok(paths)
 }
-
 
 fn sanitize_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
@@ -1747,7 +2011,7 @@ fn sanitize_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::split_csv;
+    use super::{join_remote_path, remote_parent_path, split_csv};
 
     #[test]
     fn split_csv_trims_and_filters() {
@@ -1759,5 +2023,18 @@ mod tests {
     fn split_csv_empty_returns_empty_vec() {
         let values = split_csv("   ");
         assert!(values.is_empty());
+    }
+
+    #[test]
+    fn remote_parent_path_handles_root_and_nested() {
+        assert_eq!(remote_parent_path("/"), "/");
+        assert_eq!(remote_parent_path("/root"), "/");
+        assert_eq!(remote_parent_path("/root/work/project"), "/root/work");
+    }
+
+    #[test]
+    fn join_remote_path_handles_root() {
+        assert_eq!(join_remote_path("/", "etc"), "/etc");
+        assert_eq!(join_remote_path("/root", "work"), "/root/work");
     }
 }

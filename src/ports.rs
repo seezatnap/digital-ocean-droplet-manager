@@ -2,7 +2,7 @@ use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 
 use crate::model::{AppStateFile, PortBinding};
@@ -12,7 +12,10 @@ pub fn is_port_available(port: u16) -> bool {
 }
 
 pub fn port_in_registry(state: &AppStateFile, port: u16) -> Option<&PortBinding> {
-    state.bindings.iter().find(|binding| binding.local_port == port)
+    state
+        .bindings
+        .iter()
+        .find(|binding| binding.local_port == port)
 }
 
 pub fn start_tunnel(binding: &mut PortBinding) -> Result<u32> {
@@ -21,9 +24,7 @@ pub fn start_tunnel(binding: &mut PortBinding) -> Result<u32> {
     match child.try_wait() {
         Ok(Some(status)) => {
             let stderr = read_child_stderr(&mut child);
-            return Err(anyhow!(
-                "SSH tunnel exited early ({status}). {stderr}"
-            ));
+            return Err(anyhow!("SSH tunnel exited early ({status}). {stderr}"));
         }
         Ok(None) => {
             let pid = child.id();

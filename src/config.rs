@@ -20,7 +20,8 @@ pub fn load_state() -> Result<AppStateFile> {
         return Ok(default_state());
     }
     let data = fs::read_to_string(&path).context("Failed to read state file")?;
-    let mut state: AppStateFile = serde_json::from_str(&data).context("Failed to parse state file")?;
+    let mut state: AppStateFile =
+        serde_json::from_str(&data).context("Failed to parse state file")?;
     if state.settings.default_ssh_user.is_empty() {
         state.settings = default_settings();
     }
@@ -62,7 +63,10 @@ mod tests {
         let settings = default_settings();
         assert_eq!(settings.default_ssh_user, "root");
         assert_eq!(settings.default_ssh_port, 22);
-        assert_eq!(settings.default_ssh_key_path, "/tmp/doctl-test-home/.ssh/id_rsa");
+        assert_eq!(
+            settings.default_ssh_key_path,
+            "/tmp/doctl-test-home/.ssh/id_rsa"
+        );
         if let Some(value) = original {
             unsafe {
                 std::env::set_var("HOME", value);
