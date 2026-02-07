@@ -25,6 +25,11 @@ fn main() -> anyhow::Result<()> {
     let mut last_tick = Instant::now();
 
     loop {
+        if app.take_terminal_reset() {
+            ui::restore_terminal(terminal)?;
+            terminal = ui::setup_terminal()?;
+        }
+
         terminal.draw(|f| ui::draw(f, &app))?;
 
         let timeout = tick_rate

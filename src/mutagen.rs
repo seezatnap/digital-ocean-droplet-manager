@@ -23,6 +23,8 @@ pub struct SshConfig {
 pub struct SyncSession {
     pub name: String,
     pub status: Option<String>,
+    pub beta_url: Option<String>,
+    pub beta_host: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +165,16 @@ pub fn delete_sync(name: &str, ssh: Option<&SshConfig>) -> Result<DeleteSyncOutc
     })
 }
 
+pub fn terminate_all_syncs() -> Result<usize> {
+    let sessions = list_syncs()?;
+    let mut count = 0usize;
+    for session in sessions {
+        terminate_sync(&session.name)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 fn mutagen_existing_names() -> Result<HashSet<String>> {
     if let Ok(output) = run_mutagen(&["sync", "list", "--json"]) {
         if let Ok(names) = names_from_json(&output) {
@@ -243,9 +255,25 @@ fn sessions_from_json(raw: &str) -> Result<Vec<SyncSession>> {
                     .or_else(|| item.get("Status"))
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
+                let beta_url = item
+                    .get("beta")
+                    .and_then(|v| v.get("url").or_else(|| v.get("URL")))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        item.get("betaURL")
+                            .or_else(|| item.get("betaUrl"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    });
+                let beta_host = beta_url
+                    .as_deref()
+                    .and_then(parse_host_from_url);
                 sessions.push(SyncSession {
                     name: name.to_string(),
                     status,
+                    beta_url,
+                    beta_host,
                 });
             }
         }
@@ -256,6 +284,7 @@ fn sessions_from_json(raw: &str) -> Result<Vec<SyncSession>> {
 fn sessions_from_text(raw: &str) -> Vec<SyncSession> {
     let mut sessions = Vec::new();
     let mut current: Option<usize> = None;
+    let mut in_beta = false;
     for line in raw.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -267,8 +296,11 @@ fn sessions_from_text(raw: &str) -> Vec<SyncSession> {
                 sessions.push(SyncSession {
                     name: name.to_string(),
                     status: None,
+                    beta_url: None,
+                    beta_host: None,
                 });
                 current = Some(sessions.len() - 1);
+                in_beta = false;
             }
             continue;
         }
@@ -281,6 +313,26 @@ fn sessions_from_text(raw: &str) -> Vec<SyncSession> {
             }
             continue;
         }
+        if let Some(_) = trimmed.strip_prefix("Alpha:") {
+            in_beta = false;
+            continue;
+        }
+        if let Some(_) = trimmed.strip_prefix("Beta:") {
+            in_beta = true;
+            continue;
+        }
+        if in_beta {
+            if let Some(rest) = trimmed.strip_prefix("URL:") {
+                if let Some(idx) = current {
+                    let url = rest.trim();
+                    if !url.is_empty() {
+                        sessions[idx].beta_url = Some(url.to_string());
+                        sessions[idx].beta_host = parse_host_from_url(url);
+                    }
+                }
+                continue;
+            }
+        }
         let lower = trimmed.to_lowercase();
         if lower.starts_with("name:") {
             let name = trimmed[5..].trim();
@@ -288,8 +340,11 @@ fn sessions_from_text(raw: &str) -> Vec<SyncSession> {
                 sessions.push(SyncSession {
                     name: name.to_string(),
                     status: None,
+                    beta_url: None,
+                    beta_host: None,
                 });
                 current = Some(sessions.len() - 1);
+                in_beta = false;
             }
             continue;
         }
@@ -305,28 +360,68 @@ fn sessions_from_text(raw: &str) -> Vec<SyncSession> {
     }
 
     if sessions.is_empty() {
-        let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
-        if lines.len() >= 2 {
-            for line in lines.iter().skip(1) {
-                let cols: Vec<&str> = line.split_whitespace().collect();
-                if cols.len() >= 2 {
-                    sessions.push(SyncSession {
-                        name: cols[1].to_string(),
-                        status: None,
-                    });
-                } else if cols.len() == 1 {
-                    let value = cols[0].trim();
-                    if !value.is_empty() && !value.ends_with(':') {
-                        sessions.push(SyncSession {
-                            name: value.to_string(),
-                            status: None,
-                        });
-                    }
+        let mut in_table = false;
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let lower = trimmed.to_lowercase();
+            if lower.contains("name") && lower.contains("identifier") {
+                in_table = true;
+                continue;
+            }
+            if !in_table {
+                continue;
+            }
+            if trimmed.starts_with('-') {
+                continue;
+            }
+            if let Some(first) = trimmed.split_whitespace().next() {
+                if first.ends_with(':') {
+                    continue;
                 }
+                sessions.push(SyncSession {
+                    name: first.to_string(),
+                    status: None,
+                    beta_url: None,
+                    beta_host: None,
+                });
             }
         }
     }
     sessions
+}
+
+fn parse_host_from_url(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(pos) = trimmed.find("://") {
+        let rest = &trimmed[pos + 3..];
+        let hostport = rest.split('/').next().unwrap_or(rest);
+        let hostport = hostport.rsplit('@').next().unwrap_or(hostport);
+        let host = hostport.split(':').next().unwrap_or(hostport);
+        if host.is_empty() {
+            None
+        } else {
+            Some(host.to_string())
+        }
+    } else {
+        let hostpart = trimmed.split(':').next().unwrap_or(trimmed);
+        if hostpart.contains('/') {
+            return None;
+        }
+        let hostpart = hostpart.rsplit('@').next().unwrap_or(hostpart);
+        let host = hostpart.split(':').next().unwrap_or(hostpart);
+        if host.is_empty() {
+            None
+        } else {
+            Some(host.to_string())
+        }
+    }
 }
 
 fn read_mountlist(ssh: &SshConfig) -> Result<Vec<MountEntry>> {
@@ -460,6 +555,7 @@ fn generate_sync_name(droplet_name: &str, local: &str, index: usize) -> String {
         format!("sync-{}-{}-{}", droplet, base, stamp)
     }
 }
+
 
 fn sanitize_name(input: &str) -> String {
     let mut out = String::with_capacity(input.len());

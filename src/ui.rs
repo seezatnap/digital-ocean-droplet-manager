@@ -137,7 +137,7 @@ fn draw_bindings(frame: &mut Frame, app: &App, theme: &Theme) {
     let header = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
-        .title("Bindings")
+        .title("Port Bindings")
         .title_alignment(Alignment::Left);
     let title = Paragraph::new(Line::from(vec![
         Span::styled("Active Port Bindings", Style::default().fg(theme.accent)),
@@ -181,7 +181,7 @@ fn draw_bindings(frame: &mut Frame, app: &App, theme: &Theme) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.border))
-                .title("Bindings"),
+                .title("Port Bindings"),
         )
         .highlight_style(
             Style::default()
@@ -435,10 +435,8 @@ fn draw_droplet_details(frame: &mut Frame, app: &App, theme: &Theme, area: Rect)
         Line::from(vec![Span::styled("d", Style::default().fg(theme.accent)), Span::raw(" delete")]),
         Line::from(vec![Span::styled("r", Style::default().fg(theme.accent)), Span::raw(" restore")]),
         Line::from(vec![Span::styled("b", Style::default().fg(theme.accent)), Span::raw(" bind port")]),
-        Line::from(vec![Span::styled("m", Style::default().fg(theme.accent)), Span::raw(" sync folders")]),
-        Line::from(vec![Span::styled("u", Style::default().fg(theme.accent)), Span::raw(" restore syncs")]),
-        Line::from(vec![Span::styled("y", Style::default().fg(theme.accent)), Span::raw(" sync list")]),
-        Line::from(vec![Span::styled("p", Style::default().fg(theme.accent)), Span::raw(" bindings")]),
+        Line::from(vec![Span::styled("p", Style::default().fg(theme.accent)), Span::raw(" port bindings")]),
+        Line::from(vec![Span::styled("m", Style::default().fg(theme.accent)), Span::raw(" mutagen config")]),
     ];
 
     let content = lines
@@ -458,15 +456,13 @@ fn draw_footer(frame: &mut Frame, _app: &App, theme: &Theme, area: Rect) {
         Span::styled("g", Style::default().fg(theme.accent)),
         Span::raw(" refresh  "),
         Span::styled("m", Style::default().fg(theme.accent)),
-        Span::raw(" sync  "),
-        Span::styled("u", Style::default().fg(theme.accent)),
-        Span::raw(" restore syncs  "),
-        Span::styled("y", Style::default().fg(theme.accent)),
-        Span::raw(" sync list  "),
+        Span::raw(" mutagen  "),
         Span::styled("d", Style::default().fg(theme.accent)),
         Span::raw(" delete  "),
         Span::styled("f", Style::default().fg(theme.accent)),
         Span::raw(" filter running  "),
+        Span::styled("p", Style::default().fg(theme.accent)),
+        Span::raw(" port bindings  "),
         Span::styled("q", Style::default().fg(theme.accent)),
         Span::raw(" quit"),
     ]);
@@ -476,7 +472,7 @@ fn draw_footer(frame: &mut Frame, _app: &App, theme: &Theme, area: Rect) {
     frame.render_widget(Paragraph::new(help).block(block), area);
 }
 
-fn draw_modal(frame: &mut Frame, _app: &App, modal: &Modal, theme: &Theme) {
+fn draw_modal(frame: &mut Frame, app: &App, modal: &Modal, theme: &Theme) {
     let area = centered_rect(70, 70, frame.size());
     frame.render_widget(Clear, area);
 
@@ -485,6 +481,7 @@ fn draw_modal(frame: &mut Frame, _app: &App, modal: &Modal, theme: &Theme) {
         Modal::Restore(form) => draw_restore_modal(frame, form, theme, area),
         Modal::Bind(form) => draw_bind_modal(frame, form, theme, area),
         Modal::Sync(form) => draw_sync_modal(frame, form, theme, area),
+        Modal::Mutagen(form) => draw_mutagen_modal(frame, app, form, theme, area),
         Modal::Snapshot(form) => draw_snapshot_modal(frame, form, theme, area),
         Modal::Confirm(confirm) => draw_confirm_modal(frame, confirm, theme, area),
         Modal::Picker { picker, .. } => draw_picker_modal(frame, picker, theme, area),
@@ -830,6 +827,72 @@ fn draw_sync_modal(frame: &mut Frame, form: &SyncForm, theme: &Theme, area: Rect
     if let Some((x, y)) = cursor {
         frame.set_cursor(x, y);
     }
+}
+
+fn draw_mutagen_modal(
+    frame: &mut Frame,
+    app: &App,
+    form: &crate::app::MutagenConfig,
+    theme: &Theme,
+    area: Rect,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
+        .title("Mutagen Config")
+        .title_alignment(Alignment::Left);
+    frame.render_widget(block, area);
+
+    let inner = inner_rect(area, 1);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1), Constraint::Length(2)])
+        .split(inner);
+
+    let header = Paragraph::new(Line::from(vec![
+        Span::styled("Global", Style::default().fg(theme.muted)),
+        Span::raw(" + "),
+        Span::styled("Droplet", Style::default().fg(theme.muted)),
+        Span::raw(" actions"),
+    ]));
+    frame.render_widget(header, rows[0]);
+
+    let actions = app.mutagen_actions();
+    let items: Vec<ListItem> = actions
+        .iter()
+        .map(|action| {
+            let style = if action.enabled {
+                Style::default().fg(theme.accent)
+            } else {
+                Style::default().fg(theme.muted)
+            };
+            ListItem::new(Line::from(vec![Span::styled(&action.label, style)]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title("Actions"))
+        .highlight_style(
+            Style::default()
+                .bg(theme.accent)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let mut state = ratatui::widgets::ListState::default();
+    if !actions.is_empty() {
+        state.select(Some(form.selected.min(actions.len() - 1)));
+    }
+    frame.render_stateful_widget(list, rows[1], &mut state);
+
+    let help = Paragraph::new(Line::from(vec![
+        Span::styled("Enter", Style::default().fg(theme.accent)),
+        Span::raw(" select  "),
+        Span::styled("Esc", Style::default().fg(theme.accent)),
+        Span::raw(" close"),
+    ]))
+    .style(Style::default().fg(theme.muted));
+    frame.render_widget(help, rows[2]);
 }
 
 fn draw_snapshot_modal(

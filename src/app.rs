@@ -125,6 +125,11 @@ pub struct SnapshotForm {
 }
 
 #[derive(Debug, Clone)]
+pub struct MutagenConfig {
+    pub selected: usize,
+}
+
+#[derive(Debug, Clone)]
 pub struct Confirm {
     pub title: String,
     pub message: String,
@@ -135,6 +140,8 @@ pub struct Confirm {
 pub enum ConfirmAction {
     SnapshotDelete { droplet_id: u64, snapshot_name: String },
     DeleteDroplet { droplet_id: u64 },
+    RestoreSyncs { ssh: SshConfig },
+    DisableMutagen,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +150,7 @@ pub enum Modal {
     Restore(RestoreForm),
     Bind(BindForm),
     Sync(SyncForm),
+    Mutagen(MutagenConfig),
     Snapshot(SnapshotForm),
     Picker { picker: Picker, parent: Box<Modal> },
     Confirm(Confirm),
@@ -167,6 +175,7 @@ pub struct App {
     pub last_refresh: Option<DateTime<Utc>>,
     pub filter_running: bool,
     pub pending: usize,
+    pub terminal_reset: bool,
     pub task_tx: Sender<TaskResult>,
 }
 
@@ -191,6 +200,7 @@ impl App {
             last_refresh: None,
             filter_running: false,
             pending: 0,
+            terminal_reset: false,
             task_tx,
         }
     }
@@ -383,6 +393,19 @@ impl App {
                 }
                 Err(err) => self.push_toast(err.to_string(), ToastLevel::Error),
             },
+            TaskResult::TerminateAllSyncs(res) => match res {
+                Ok(count) => {
+                    self.push_toast(
+                        format!(
+                            "Terminated {count} Mutagen sync{}",
+                            if count == 1 { "" } else { "s" }
+                        ),
+                        ToastLevel::Success,
+                    );
+                    self.spawn(Task::LoadSyncs);
+                }
+                Err(err) => self.push_toast(err.to_string(), ToastLevel::Error),
+            },
         }
     }
 
@@ -408,9 +431,7 @@ impl App {
             KeyCode::Char('s') => self.open_snapshot_modal(),
             KeyCode::Char('d') => self.open_delete_modal(),
             KeyCode::Char('b') => self.open_bind_modal(),
-            KeyCode::Char('m') => self.open_sync_modal(),
-            KeyCode::Char('u') => self.restore_syncs(),
-            KeyCode::Char('y') => self.open_syncs_screen(),
+            KeyCode::Char('m') => self.open_mutagen_modal(),
             KeyCode::Char('p') => {
                 self.screen = Screen::Bindings;
                 self.selected = 0;
@@ -474,6 +495,11 @@ impl App {
             Modal::Sync(mut form) => {
                 if self.handle_sync_form_key(&mut form, key) {
                     self.modal = Some(Modal::Sync(form));
+                }
+            }
+            Modal::Mutagen(mut form) => {
+                if self.handle_mutagen_key(&mut form, key) {
+                    self.modal = Some(Modal::Mutagen(form));
                 }
             }
             Modal::Snapshot(mut form) => {
@@ -710,6 +736,38 @@ impl App {
         true
     }
 
+    fn handle_mutagen_key(&mut self, form: &mut MutagenConfig, key: KeyEvent) -> bool {
+        let actions = self.mutagen_actions();
+        match key.code {
+            KeyCode::Esc => {
+                self.modal = None;
+                return false;
+            }
+            KeyCode::Up => {
+                if form.selected > 0 {
+                    form.selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if form.selected + 1 < actions.len() {
+                    form.selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(action) = actions.get(form.selected) {
+                    if !action.enabled {
+                        self.push_toast(action.disabled_hint.clone(), ToastLevel::Warning);
+                        return true;
+                    }
+                    self.handle_mutagen_action(action.kind);
+                    return false;
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
     fn handle_snapshot_key(&mut self, form: &mut SnapshotForm, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc => {
@@ -802,6 +860,14 @@ impl App {
                     self.spawn(Task::DeleteDroplet { droplet_id });
                     self.modal = None;
                 }
+                ConfirmAction::RestoreSyncs { ssh, .. } => {
+                    self.spawn(Task::RestoreSyncs { ssh });
+                    self.modal = None;
+                }
+                ConfirmAction::DisableMutagen => {
+                    self.spawn(Task::TerminateAllSyncs);
+                    self.modal = None;
+                }
             },
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 self.modal = None;
@@ -869,6 +935,11 @@ impl App {
             focus: 0,
         };
         self.modal = Some(Modal::Bind(form));
+    }
+
+    fn open_mutagen_modal(&mut self) {
+        let form = MutagenConfig { selected: 0 };
+        self.modal = Some(Modal::Mutagen(form));
     }
 
     fn open_sync_modal(&mut self) {
@@ -1263,7 +1334,20 @@ impl App {
 
     fn restore_syncs(&mut self) {
         match self.selected_ssh_config() {
-            Ok(ssh) => self.spawn(Task::RestoreSyncs { ssh }),
+            Ok(ssh) => {
+                let name = self
+                    .selected_droplet()
+                    .map(|droplet| droplet.name.clone())
+                    .unwrap_or_else(|| "droplet".to_string());
+                let confirm = Confirm {
+                    title: "Restore Syncs".to_string(),
+                    message: format!(
+                        "Restore syncs from ~/.mountlist for droplet '{name}'?"
+                    ),
+                    action: ConfirmAction::RestoreSyncs { ssh },
+                };
+                self.modal = Some(Modal::Confirm(confirm));
+            }
             Err(err) => self.push_toast(err.to_string(), ToastLevel::Warning),
         }
     }
@@ -1330,6 +1414,7 @@ impl App {
         if let Err(err) = crate::ui::run_interactive(&["compute", "ssh", &droplet_id]) {
             self.push_toast(err.to_string(), ToastLevel::Error);
         }
+        self.terminal_reset = true;
     }
 
     fn cleanup_stale(&mut self) {
@@ -1365,10 +1450,10 @@ impl App {
         }
     }
 
-    fn open_syncs_screen(&mut self) {
+    fn open_syncs_screen_global(&mut self) {
         self.screen = Screen::Syncs;
         self.selected = 0;
-        self.syncs_context = self.selected_ssh_config().ok();
+        self.syncs_context = None;
         self.spawn(Task::LoadSyncs);
     }
 
@@ -1400,6 +1485,52 @@ impl App {
             port: settings.default_ssh_port,
             key_path: settings.default_ssh_key_path.clone(),
         })
+    }
+
+    pub(crate) fn mutagen_actions(&self) -> Vec<MutagenAction> {
+        let droplet_ready = self.selected_ssh_config().is_ok();
+        vec![
+            MutagenAction {
+                label: "Global: Sync List".to_string(),
+                kind: MutagenActionKind::ListSyncs,
+                enabled: true,
+                disabled_hint: "Sync list unavailable".to_string(),
+            },
+            MutagenAction {
+                label: "Global: Turn Mutagen Off".to_string(),
+                kind: MutagenActionKind::DisableMutagen,
+                enabled: true,
+                disabled_hint: "Mutagen not available".to_string(),
+            },
+            MutagenAction {
+                label: "Droplet: Add Synced Folder".to_string(),
+                kind: MutagenActionKind::AddSync,
+                enabled: droplet_ready,
+                disabled_hint: "Select a running droplet with a public IP".to_string(),
+            },
+            MutagenAction {
+                label: "Droplet: Restore Syncs".to_string(),
+                kind: MutagenActionKind::RestoreSyncs,
+                enabled: droplet_ready,
+                disabled_hint: "Select a running droplet with a public IP".to_string(),
+            },
+        ]
+    }
+
+    fn handle_mutagen_action(&mut self, kind: MutagenActionKind) {
+        match kind {
+            MutagenActionKind::AddSync => self.open_sync_modal(),
+            MutagenActionKind::RestoreSyncs => self.restore_syncs(),
+            MutagenActionKind::ListSyncs => self.open_syncs_screen_global(),
+            MutagenActionKind::DisableMutagen => {
+                let confirm = Confirm {
+                    title: "Disable Mutagen".to_string(),
+                    message: "Terminate all Mutagen sync sessions?".to_string(),
+                    action: ConfirmAction::DisableMutagen,
+                };
+                self.modal = Some(Modal::Confirm(confirm));
+            }
+        }
     }
 
     pub(crate) fn selected_droplet(&self) -> Option<&Droplet> {
@@ -1438,6 +1569,15 @@ impl App {
             }
         }
         let _ = config::save_state(&self.state);
+    }
+
+    pub fn take_terminal_reset(&mut self) -> bool {
+        if self.terminal_reset {
+            self.terminal_reset = false;
+            true
+        } else {
+            false
+        }
     }
 
     fn snapshot_picker_items(&self) -> Vec<PickerItem> {
@@ -1522,6 +1662,22 @@ fn split_csv(value: &str) -> Vec<String> {
         .collect()
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum MutagenActionKind {
+    ListSyncs,
+    DisableMutagen,
+    AddSync,
+    RestoreSyncs,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MutagenAction {
+    pub(crate) label: String,
+    pub(crate) kind: MutagenActionKind,
+    pub(crate) enabled: bool,
+    pub(crate) disabled_hint: String,
+}
+
 fn parse_sync_paths(value: &str) -> anyhow::Result<Vec<SyncPath>> {
     let items = split_csv(value);
     if items.is_empty() {
@@ -1550,6 +1706,7 @@ fn parse_sync_paths(value: &str) -> anyhow::Result<Vec<SyncPath>> {
     }
     Ok(paths)
 }
+
 
 fn sanitize_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len());

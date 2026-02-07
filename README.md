@@ -30,11 +30,9 @@ cargo run
 - `s` snapshot + delete droplet
 - `d` delete droplet (no snapshot)
 - `b` bind local port to droplet port
-- `m` sync local folders to droplet (Mutagen)
-- `u` restore Mutagen syncs from `~/.mountlist`
-- `y` list/delete Mutagen syncs
+- `m` Mutagen config (sync, restore, list, disable)
 - `Enter` connect to selected droplet
-- `p` manage port bindings
+- `p` port bindings
 - `f` toggle running-only filter
 - `q` quit
 

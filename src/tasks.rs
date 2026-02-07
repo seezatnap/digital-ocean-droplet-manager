@@ -36,6 +36,7 @@ pub enum Task {
         name: String,
         ssh: Option<SshConfig>,
     },
+    TerminateAllSyncs,
 }
 
 #[derive(Debug)]
@@ -57,6 +58,7 @@ pub enum TaskResult {
     RestoreSyncs(Result<usize>),
     Syncs(Result<Vec<SyncSession>>),
     DeleteSync(Result<DeleteSyncOutcome>),
+    TerminateAllSyncs(Result<usize>),
 }
 
 pub fn spawn(task: Task, tx: Sender<TaskResult>) {
@@ -104,6 +106,9 @@ pub fn spawn(task: Task, tx: Sender<TaskResult>) {
             Task::LoadSyncs => TaskResult::Syncs(mutagen::list_syncs()),
             Task::DeleteSync { name, ssh } => {
                 TaskResult::DeleteSync(mutagen::delete_sync(&name, ssh.as_ref()))
+            }
+            Task::TerminateAllSyncs => {
+                TaskResult::TerminateAllSyncs(mutagen::terminate_all_syncs())
             }
         };
         let _ = tx.send(result);
